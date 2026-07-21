@@ -168,6 +168,25 @@ Running `node scripts/setup.js` provisions these Okta resources:
 
 All generated values (`*_AUTHZ_SERVER_ID`, `*_OKTA_CLIENT_ID`, `*_OKTA_AI_AGENT_ID`, `*_PRIVATE_KEY`, etc.) are written into `.env` automatically.
 
+### Manual setup required for P1 (3rd Party Coding Assistant — Okta MCP Bridge)
+
+> **P1 requires the Okta MCP Bridge, which is a separate Okta product not included in this repository.**
+
+The bridge is a standalone service that sits between a coding assistant (Claude Code, Cursor, VS Code) and the MCP resource servers. It handles DCR, PKCE login, and XAA token exchange transparently — the coding assistant never touches Okta credentials directly.
+
+**You must obtain and run the bridge independently before starting P1:**
+
+1. Get access to the `okta-agent-mcp-adapter` Docker image from Okta
+2. Start it on your host (default port `8008`) and configure it with your Okta credentials and the MCP server backend URLs:
+   - HR MCP server: `http://localhost:3101`
+   - Finance MCP server: `http://localhost:3102`
+3. Set `MCP_ADAPTER_URL=http://localhost:8008` in `.env` (already the default)
+4. Then run `docker compose --profile p1 up --build` to start the HR and Finance resource servers
+
+The console's ConnectionGuide panel on the P1 page provides step-by-step instructions for connecting Claude Code, Cursor, or VS Code to the running bridge.
+
+---
+
 ### Manual setup required for P4 (Outbound SaaS)
 
 P4 uses Okta OIN integrations that cannot be created via the Management API:
