@@ -14,7 +14,7 @@ Modern AI agents act on behalf of users or autonomously on their own. Both cases
 
 | # | Pattern | Auth Flow | Status |
 |---|---------|-----------|--------|
-| P1 | [3rd Party Coding Assistant](docs/patterns/p1.md) | 3rd party coding assistant → multiple MCP resources via Okta MCP Bridge | ✅ Built |
+| P1 | [3rd Party Coding Assistant](docs/patterns/p1.md) | 3rd party coding assistant → multiple MCP resources via Okta MCP Bridge | ✅ Built — ⚠️ requires Okta MCP Bridge (separate product, not included) |
 | P2 | [3rd Party Consumer Agent](docs/patterns/p2.md) | Consumer agent → Inventory resource; user delegates via inline PKCE | ✅ Built |
 | P3 | [1st Party XAA Native](docs/patterns/p3.md) | 1st party agent → user-delegated identity via Okta XAA (ID-JAG) → HR + Finance | ✅ Built |
 | P4 | [Outbound SaaS via Okta STS](docs/patterns/p4.md) | 1st party agent → GitHub + Slack via Okta STS token brokering | ✅ Built |
@@ -97,6 +97,7 @@ okta-agentic-demo/
 - Node.js 18+ (for the setup script)
 - An Okta org — free developer org at [developer.okta.com](https://developer.okta.com)
 - At least one LLM key: Anthropic (`sk-ant-...`) or OpenAI (`sk-...`)
+- **P1 only — Okta MCP Bridge:** P1 requires the `okta-agent-mcp-adapter`, a standalone Okta product not included in this repo. You must obtain it separately from Okta and run it on your host before starting the P1 profile. See [Manual setup required for P1](#manual-setup-required-for-p1-3rd-party-coding-assistant--okta-mcp-bridge) for details.
 
 ### 1. Clone and configure
 
