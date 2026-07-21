@@ -1,6 +1,6 @@
 # Okta Agentic Patterns Demo
 
-A customer-facing demo application showcasing all 7 Okta agentic identity patterns in a single running environment. Each pattern is an isolated service demonstrating a different approach to securing AI agents — from delegated user identity through to fully autonomous machine-to-machine flows.
+A customer-facing demo application showcasing 8 Okta agentic identity patterns in a single running environment. Each pattern is an isolated service demonstrating a different approach to securing AI agents — from delegated user identity through to fully autonomous machine-to-machine flows.
 
 ---
 
@@ -20,7 +20,8 @@ Modern AI agents act on behalf of users or autonomously on their own. Both cases
 | P4 | [Outbound SaaS via Okta STS](docs/patterns/p4.md) | 1st party agent → GitHub + Slack via Okta STS token brokering | ✅ Built |
 | P5 | [Human-in-the-Loop](docs/patterns/p5.md) | Agent pauses for explicit human approval before sensitive actions | 🔲 Pending |
 | P6 | [Autonomous A2A Delegation](docs/patterns/p6.md) | User signs in → orchestrator delegates to worker agents via Okta A2A; identity chain flows end-to-end to HR + Finance | ✅ Built |
-| P7 | [Multi-Tenant FGA](docs/patterns/p7.md) | SaaS vendor AI + Okta FGA enforcing tenant data isolation | 🔲 Pending |
+| P7 | [Agentic Permission Scoping](docs/patterns/p7.md) | User delegates specific tool permissions to the agent via Okta FGA; grants are enforced in real-time, mid-conversation | ✅ Built |
+| P8 | [Agent Building Platforms](docs/patterns/p8.md) | Okta identity for agents built on AWS Bedrock, Salesforce Agentforce, Microsoft Copilot Studio, and Google Vertex AI | 📹 Videos |
 
 ---
 
@@ -211,7 +212,8 @@ See [docs/patterns/p6.md](docs/patterns/p6.md) for the full token exchange flow 
 - [P4 — Outbound SaaS via Okta STS](docs/patterns/p4.md)
 - [P5 — Human-in-the-Loop](docs/patterns/p5.md) *(pending)*
 - [P6 — Autonomous A2A Delegation](docs/patterns/p6.md)
-- [P7 — Multi-Tenant FGA](docs/patterns/p7.md) *(pending)*
+- [P7 — Agentic Permission Scoping](docs/patterns/p7.md)
+- [P8 — Agent Building Platforms](docs/patterns/p8.md) *(video showcase)*
 
 ## Additional Docs
 
