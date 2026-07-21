@@ -1,0 +1,517 @@
+{
+  "info": {
+    "name": "Okta A2A Delegation — User Sign-On",
+    "_postman_id": "f1a2b3c4-d5e6-4890-abcd-ef1234567890",
+    "description": "Full call sequence for Okta agent-to-agent delegation with user sign-on.\n\n⚠️  CLIENT ASSERTIONS: The *_ASSERTION_* collection variables must be set manually before running any token-exchange step. Each is a short-lived RS256 JWT (exp = now+300) with claims: { iss: <WLP_ID>, sub: <WLP_ID>, aud: <token endpoint URL>, jti: <random UUID> }. Use validate-a2a.mjs or a JWT tool to generate them.\n\nToken flow: User id_token → [A1] ID-JAG → [A2] A2A token → [Invoke Worker] → [B1] Domain ID-JAG → [B2] Resource token → MCP tool call",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "OKTA_DOMAIN", "value": "", "description": "Okta domain, e.g. company.oktapreview.com" },
+    { "key": "APP_BASE_URL", "value": "http://localhost:3020", "description": "Console base URL" },
+    { "key": "ORCHESTRATOR_CLIENT_ID", "value": "", "description": "OAuth client ID for the orchestrator app (PKCE login)" },
+    { "key": "ORCHESTRATOR_CLIENT_SECRET", "value": "", "description": "OAuth client secret" },
+    { "key": "ORCHESTRATOR_AGENT_URL", "value": "http://localhost:3600", "description": "Orchestrator agent HTTP base URL" },
+    { "key": "HR_WORKER_A2A_AUTHZ_SERVER_ID", "value": "", "description": "Okta auth server ID for HR Worker A2A" },
+    { "key": "HR_WORKER_RESOURCE_URL", "value": "https://hr.agent", "description": "HR Worker HTTPS resource URL (not an ORN)" },
+    { "key": "HR_WORKER_URL", "value": "http://localhost:3601", "description": "HR Worker service base URL" },
+    { "key": "HR_DOMAIN_AUTHZ_SERVER_ID", "value": "", "description": "Okta auth server ID for HR domain resource" },
+    { "key": "HR_RESOURCE_AUDIENCE", "value": "", "description": "HR resource token audience, e.g. api:hr" },
+    { "key": "HR_MCP_SERVER_URL", "value": "http://localhost:3101", "description": "HR MCP server base URL" },
+    { "key": "FIN_WORKER_A2A_AUTHZ_SERVER_ID", "value": "", "description": "Okta auth server ID for Finance Worker A2A" },
+    { "key": "FIN_WORKER_RESOURCE_URL", "value": "https://fin.agent", "description": "Finance Worker HTTPS resource URL (not an ORN)" },
+    { "key": "FIN_WORKER_URL", "value": "http://localhost:3602", "description": "Finance Worker service base URL" },
+    { "key": "FIN_DOMAIN_AUTHZ_SERVER_ID", "value": "", "description": "Okta auth server ID for Finance domain resource" },
+    { "key": "FIN_RESOURCE_AUDIENCE", "value": "", "description": "Finance resource token audience, e.g. api:finance" },
+    { "key": "FIN_MCP_SERVER_URL", "value": "http://localhost:3102", "description": "Finance MCP server base URL" },
+    { "key": "AUTH_CODE", "value": "", "description": "Paste the code= param from the Okta redirect after running step 1.1" },
+    { "key": "USER_ID_TOKEN", "value": "", "description": "Auto-populated by step 1.2 test script" },
+    { "key": "HR_ID_JAG", "value": "", "description": "Auto-populated by step 3.1 test script" },
+    { "key": "HR_A2A_TOKEN", "value": "", "description": "Auto-populated by step 3.2 test script" },
+    { "key": "HR_DOMAIN_ID_JAG", "value": "", "description": "Auto-populated by step 3.4 test script" },
+    { "key": "HR_RESOURCE_TOKEN", "value": "", "description": "Auto-populated by step 3.5 test script" },
+    { "key": "FIN_ID_JAG", "value": "", "description": "Auto-populated by step 4.1 test script" },
+    { "key": "FIN_A2A_TOKEN", "value": "", "description": "Auto-populated by step 4.2 test script" },
+    { "key": "FIN_DOMAIN_ID_JAG", "value": "", "description": "Auto-populated by step 4.4 test script" },
+    { "key": "FIN_RESOURCE_TOKEN", "value": "", "description": "Auto-populated by step 4.5 test script" },
+    { "key": "ORCH_ASSERTION_ORG_AS", "value": "", "description": "Set manually. RS256 JWT: iss=sub=ORCHESTRATOR_WLP, aud=https://{{OKTA_DOMAIN}}/oauth2/v1/token, exp=now+300, jti=uuid" },
+    { "key": "ORCH_ASSERTION_HR_A2A_AS", "value": "", "description": "Set manually. RS256 JWT: iss=sub=ORCHESTRATOR_WLP, aud=https://{{OKTA_DOMAIN}}/oauth2/{{HR_WORKER_A2A_AUTHZ_SERVER_ID}}/v1/token" },
+    { "key": "ORCH_ASSERTION_FIN_A2A_AS", "value": "", "description": "Set manually. RS256 JWT: iss=sub=ORCHESTRATOR_WLP, aud=https://{{OKTA_DOMAIN}}/oauth2/{{FIN_WORKER_A2A_AUTHZ_SERVER_ID}}/v1/token" },
+    { "key": "HR_WORKER_ASSERTION_ORG_AS", "value": "", "description": "Set manually. RS256 JWT: iss=sub=HR_WORKER_WLP, aud=https://{{OKTA_DOMAIN}}/oauth2/v1/token" },
+    { "key": "HR_WORKER_ASSERTION_DOMAIN_AS", "value": "", "description": "Set manually. RS256 JWT: iss=sub=HR_WORKER_WLP, aud=https://{{OKTA_DOMAIN}}/oauth2/{{HR_DOMAIN_AUTHZ_SERVER_ID}}/v1/token" },
+    { "key": "FIN_WORKER_ASSERTION_ORG_AS", "value": "", "description": "Set manually. RS256 JWT: iss=sub=FIN_WORKER_WLP, aud=https://{{OKTA_DOMAIN}}/oauth2/v1/token" },
+    { "key": "FIN_WORKER_ASSERTION_DOMAIN_AS", "value": "", "description": "Set manually. RS256 JWT: iss=sub=FIN_WORKER_WLP, aud=https://{{OKTA_DOMAIN}}/oauth2/{{FIN_DOMAIN_AUTHZ_SERVER_ID}}/v1/token" }
+  ],
+  "item": [
+    {
+      "name": "1 · User Auth",
+      "item": [
+        {
+          "name": "1.1 Authorization Redirect",
+          "request": {
+            "method": "GET",
+            "description": "Browser-based PKCE redirect. In Postman: disable 'Automatically follow redirects', send this request, copy the code= param from the Location response header, paste it into the AUTH_CODE collection variable, then run step 1.2.",
+            "header": [],
+            "url": "https://{{OKTA_DOMAIN}}/oauth2/v1/authorize?client_id={{ORCHESTRATOR_CLIENT_ID}}&response_type=code&scope=openid%20profile%20email&redirect_uri={{APP_BASE_URL}}/api/auth/callback&state=postman-test"
+          }
+        },
+        {
+          "name": "1.2 Code Exchange",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "if (json.id_token) {",
+                  "  pm.collectionVariables.set('USER_ID_TOKEN', json.id_token);",
+                  "  console.log('USER_ID_TOKEN set');",
+                  "} else {",
+                  "  console.error('id_token not found', JSON.stringify(json));",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "description": "Exchanges the authorization code for tokens. Uses Basic auth (client_id:client_secret). Sets USER_ID_TOKEN on success.",
+            "auth": {
+              "type": "basic",
+              "basic": [
+                { "key": "username", "value": "{{ORCHESTRATOR_CLIENT_ID}}", "type": "string" },
+                { "key": "password", "value": "{{ORCHESTRATOR_CLIENT_SECRET}}", "type": "string" }
+              ]
+            },
+            "header": [
+              { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "grant_type", "value": "authorization_code", "type": "text" },
+                { "key": "code", "value": "{{AUTH_CODE}}", "type": "text" },
+                { "key": "redirect_uri", "value": "{{APP_BASE_URL}}/api/auth/callback", "type": "text" }
+              ]
+            },
+            "url": "https://{{OKTA_DOMAIN}}/oauth2/v1/token"
+          }
+        }
+      ]
+    },
+    {
+      "name": "2 · Orchestrator Chat",
+      "item": [
+        {
+          "name": "2.1 Chat Message",
+          "request": {
+            "method": "POST",
+            "description": "Sends a chat message to the orchestrator agent. The orchestrator requires the user's id_token as Bearer — returns 401 without it.",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{USER_ID_TOKEN}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"Generate the org pulse report\",\n  \"session_id\": \"postman-session-001\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{ORCHESTRATOR_AGENT_URL}}/chat"
+          }
+        }
+      ]
+    },
+    {
+      "name": "3 · HR Worker",
+      "item": [
+        {
+          "name": "3.1 Step A1 — ID-JAG for HR Worker",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "if (json.access_token) {",
+                  "  pm.collectionVariables.set('HR_ID_JAG', json.access_token);",
+                  "  console.log('HR_ID_JAG set');",
+                  "} else {",
+                  "  console.error('Step A1 failed', JSON.stringify(json));",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "description": "token-exchange at the org AS. subject = user id_token. Returns ID-JAG: aud = HR Worker A2A AS issuer URL, scp = agent.invoke.\n\nRequires ORCH_ASSERTION_ORG_AS to be set.",
+            "header": [
+              { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "grant_type", "value": "urn:ietf:params:oauth:grant-type:token-exchange", "type": "text" },
+                { "key": "requested_token_type", "value": "urn:ietf:params:oauth:token-type:id-jag", "type": "text" },
+                { "key": "subject_token", "value": "{{USER_ID_TOKEN}}", "type": "text" },
+                { "key": "subject_token_type", "value": "urn:ietf:params:oauth:token-type:id_token", "type": "text" },
+                { "key": "audience", "value": "https://{{OKTA_DOMAIN}}/oauth2/{{HR_WORKER_A2A_AUTHZ_SERVER_ID}}", "type": "text" },
+                { "key": "resource", "value": "{{HR_WORKER_RESOURCE_URL}}", "type": "text", "description": "HTTPS URL — NOT an ORN" },
+                { "key": "scope", "value": "agent.invoke", "type": "text" },
+                { "key": "client_assertion_type", "value": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer", "type": "text" },
+                { "key": "client_assertion", "value": "{{ORCH_ASSERTION_ORG_AS}}", "type": "text" }
+              ]
+            },
+            "url": "https://{{OKTA_DOMAIN}}/oauth2/v1/token"
+          }
+        },
+        {
+          "name": "3.2 Step A2 — A2A Access Token (HR)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "if (json.access_token) {",
+                  "  pm.collectionVariables.set('HR_A2A_TOKEN', json.access_token);",
+                  "  console.log('HR_A2A_TOKEN set');",
+                  "} else {",
+                  "  console.error('Step A2 failed', JSON.stringify(json));",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "description": "jwt-bearer at HR Worker A2A AS. assertion = ID-JAG from 3.1. Returns A2A token: aud = HR_WORKER_RESOURCE_URL, scp = agent.invoke.\n\nDo NOT add a scope param — Okta returns invalid_request.\n\nRequires ORCH_ASSERTION_HR_A2A_AS (different aud from 3.1).",
+            "header": [
+              { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "grant_type", "value": "urn:ietf:params:oauth:grant-type:jwt-bearer", "type": "text" },
+                { "key": "assertion", "value": "{{HR_ID_JAG}}", "type": "text" },
+                { "key": "client_assertion_type", "value": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer", "type": "text" },
+                { "key": "client_assertion", "value": "{{ORCH_ASSERTION_HR_A2A_AS}}", "type": "text" }
+              ]
+            },
+            "url": "https://{{OKTA_DOMAIN}}/oauth2/{{HR_WORKER_A2A_AUTHZ_SERVER_ID}}/v1/token"
+          }
+        },
+        {
+          "name": "3.3 Invoke HR Worker",
+          "request": {
+            "method": "POST",
+            "description": "Sends a task to the HR worker with the A2A access token as Bearer. Worker validates the token (JWKS from its A2A AS, aud = HR_WORKER_RESOURCE_URL, scp includes agent.invoke), runs B1/B2 internally, and returns { ok: true, summary: \"...\" }.",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{HR_A2A_TOKEN}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"task\": \"Analyze the current HR org: headcount by department, recent title changes, org chart summary\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{HR_WORKER_URL}}/invoke"
+          }
+        },
+        {
+          "name": "3.4 Step B1 — Domain ID-JAG (HR)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "if (json.access_token) {",
+                  "  pm.collectionVariables.set('HR_DOMAIN_ID_JAG', json.access_token);",
+                  "  console.log('HR_DOMAIN_ID_JAG set');",
+                  "} else {",
+                  "  console.error('Step B1 failed', JSON.stringify(json));",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "description": "token-exchange at the org AS. subject = HR A2A token.\n\nsubject_token_type is access_token here — NOT id_token. The A2A token is a plain access_token.\n\nReturns domain ID-JAG with 3-level act chain.\n\nRequires HR_WORKER_ASSERTION_ORG_AS.",
+            "header": [
+              { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "grant_type", "value": "urn:ietf:params:oauth:grant-type:token-exchange", "type": "text" },
+                { "key": "requested_token_type", "value": "urn:ietf:params:oauth:token-type:id-jag", "type": "text" },
+                { "key": "subject_token", "value": "{{HR_A2A_TOKEN}}", "type": "text" },
+                { "key": "subject_token_type", "value": "urn:ietf:params:oauth:token-type:access_token", "type": "text", "description": "NOT id_token" },
+                { "key": "audience", "value": "https://{{OKTA_DOMAIN}}/oauth2/{{HR_DOMAIN_AUTHZ_SERVER_ID}}", "type": "text" },
+                { "key": "scope", "value": "hr:read", "type": "text" },
+                { "key": "client_assertion_type", "value": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer", "type": "text" },
+                { "key": "client_assertion", "value": "{{HR_WORKER_ASSERTION_ORG_AS}}", "type": "text" }
+              ]
+            },
+            "url": "https://{{OKTA_DOMAIN}}/oauth2/v1/token"
+          }
+        },
+        {
+          "name": "3.5 Step B2 — HR Resource Token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "if (json.access_token) {",
+                  "  pm.collectionVariables.set('HR_RESOURCE_TOKEN', json.access_token);",
+                  "  console.log('HR_RESOURCE_TOKEN set');",
+                  "} else {",
+                  "  console.error('Step B2 failed', JSON.stringify(json));",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "description": "jwt-bearer at the HR domain AS. assertion = domain ID-JAG from 3.4. Returns HR resource token: aud = HR_RESOURCE_AUDIENCE, scp = hr:read, full 3-level act chain.\n\nDo NOT add a scope param.\n\nRequires HR_WORKER_ASSERTION_DOMAIN_AS (different aud from 3.4).",
+            "header": [
+              { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "grant_type", "value": "urn:ietf:params:oauth:grant-type:jwt-bearer", "type": "text" },
+                { "key": "assertion", "value": "{{HR_DOMAIN_ID_JAG}}", "type": "text" },
+                { "key": "client_assertion_type", "value": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer", "type": "text" },
+                { "key": "client_assertion", "value": "{{HR_WORKER_ASSERTION_DOMAIN_AS}}", "type": "text" }
+              ]
+            },
+            "url": "https://{{OKTA_DOMAIN}}/oauth2/{{HR_DOMAIN_AUTHZ_SERVER_ID}}/v1/token"
+          }
+        },
+        {
+          "name": "3.6 HR MCP — list_employees",
+          "request": {
+            "method": "POST",
+            "description": "Example MCP tool call to the HR resource server. Server validates the token via JWKS (HR domain AS) and checks aud = HR_RESOURCE_AUDIENCE.",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{HR_RESOURCE_TOKEN}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"jsonrpc\": \"2.0\",\n  \"id\": 1,\n  \"method\": \"tools/call\",\n  \"params\": {\n    \"name\": \"list_employees\",\n    \"arguments\": {}\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{HR_MCP_SERVER_URL}}/mcp"
+          }
+        }
+      ]
+    },
+    {
+      "name": "4 · Finance Worker",
+      "item": [
+        {
+          "name": "4.1 Step A1 — ID-JAG for Finance Worker",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "if (json.access_token) {",
+                  "  pm.collectionVariables.set('FIN_ID_JAG', json.access_token);",
+                  "  console.log('FIN_ID_JAG set');",
+                  "} else {",
+                  "  console.error('Step A1 (Finance) failed', JSON.stringify(json));",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "description": "token-exchange at the org AS. subject = user id_token. Returns ID-JAG: aud = Finance Worker A2A AS issuer URL, scp = agent.invoke.\n\nRequires ORCH_ASSERTION_ORG_AS (regenerate if expired since 3.1).",
+            "header": [
+              { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "grant_type", "value": "urn:ietf:params:oauth:grant-type:token-exchange", "type": "text" },
+                { "key": "requested_token_type", "value": "urn:ietf:params:oauth:token-type:id-jag", "type": "text" },
+                { "key": "subject_token", "value": "{{USER_ID_TOKEN}}", "type": "text" },
+                { "key": "subject_token_type", "value": "urn:ietf:params:oauth:token-type:id_token", "type": "text" },
+                { "key": "audience", "value": "https://{{OKTA_DOMAIN}}/oauth2/{{FIN_WORKER_A2A_AUTHZ_SERVER_ID}}", "type": "text" },
+                { "key": "resource", "value": "{{FIN_WORKER_RESOURCE_URL}}", "type": "text", "description": "HTTPS URL — NOT an ORN" },
+                { "key": "scope", "value": "agent.invoke", "type": "text" },
+                { "key": "client_assertion_type", "value": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer", "type": "text" },
+                { "key": "client_assertion", "value": "{{ORCH_ASSERTION_ORG_AS}}", "type": "text" }
+              ]
+            },
+            "url": "https://{{OKTA_DOMAIN}}/oauth2/v1/token"
+          }
+        },
+        {
+          "name": "4.2 Step A2 — A2A Access Token (Finance)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "if (json.access_token) {",
+                  "  pm.collectionVariables.set('FIN_A2A_TOKEN', json.access_token);",
+                  "  console.log('FIN_A2A_TOKEN set');",
+                  "} else {",
+                  "  console.error('Step A2 (Finance) failed', JSON.stringify(json));",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "description": "jwt-bearer at Finance Worker A2A AS. No scope param.\n\nRequires ORCH_ASSERTION_FIN_A2A_AS (aud = Finance Worker A2A token URL).",
+            "header": [
+              { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "grant_type", "value": "urn:ietf:params:oauth:grant-type:jwt-bearer", "type": "text" },
+                { "key": "assertion", "value": "{{FIN_ID_JAG}}", "type": "text" },
+                { "key": "client_assertion_type", "value": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer", "type": "text" },
+                { "key": "client_assertion", "value": "{{ORCH_ASSERTION_FIN_A2A_AS}}", "type": "text" }
+              ]
+            },
+            "url": "https://{{OKTA_DOMAIN}}/oauth2/{{FIN_WORKER_A2A_AUTHZ_SERVER_ID}}/v1/token"
+          }
+        },
+        {
+          "name": "4.3 Invoke Finance Worker",
+          "request": {
+            "method": "POST",
+            "description": "Sends a task to the Finance worker with the A2A token as Bearer. Returns { ok: true, summary: \"...\" }.",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{FIN_A2A_TOKEN}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"task\": \"Analyze current budget utilization, pending invoices, and cost center spend\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{FIN_WORKER_URL}}/invoke"
+          }
+        },
+        {
+          "name": "4.4 Step B1 — Domain ID-JAG (Finance)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "if (json.access_token) {",
+                  "  pm.collectionVariables.set('FIN_DOMAIN_ID_JAG', json.access_token);",
+                  "  console.log('FIN_DOMAIN_ID_JAG set');",
+                  "} else {",
+                  "  console.error('Step B1 (Finance) failed', JSON.stringify(json));",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "description": "token-exchange at org AS. subject = Finance A2A token (subject_token_type = access_token).\n\nRequires FIN_WORKER_ASSERTION_ORG_AS.",
+            "header": [
+              { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "grant_type", "value": "urn:ietf:params:oauth:grant-type:token-exchange", "type": "text" },
+                { "key": "requested_token_type", "value": "urn:ietf:params:oauth:token-type:id-jag", "type": "text" },
+                { "key": "subject_token", "value": "{{FIN_A2A_TOKEN}}", "type": "text" },
+                { "key": "subject_token_type", "value": "urn:ietf:params:oauth:token-type:access_token", "type": "text", "description": "NOT id_token" },
+                { "key": "audience", "value": "https://{{OKTA_DOMAIN}}/oauth2/{{FIN_DOMAIN_AUTHZ_SERVER_ID}}", "type": "text" },
+                { "key": "scope", "value": "finance:read", "type": "text" },
+                { "key": "client_assertion_type", "value": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer", "type": "text" },
+                { "key": "client_assertion", "value": "{{FIN_WORKER_ASSERTION_ORG_AS}}", "type": "text" }
+              ]
+            },
+            "url": "https://{{OKTA_DOMAIN}}/oauth2/v1/token"
+          }
+        },
+        {
+          "name": "4.5 Step B2 — Finance Resource Token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "if (json.access_token) {",
+                  "  pm.collectionVariables.set('FIN_RESOURCE_TOKEN', json.access_token);",
+                  "  console.log('FIN_RESOURCE_TOKEN set');",
+                  "} else {",
+                  "  console.error('Step B2 (Finance) failed', JSON.stringify(json));",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "description": "jwt-bearer at Finance domain AS. No scope param. Returns Finance resource token: aud = FIN_RESOURCE_AUDIENCE, scp = finance:read.\n\nRequires FIN_WORKER_ASSERTION_DOMAIN_AS.",
+            "header": [
+              { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "grant_type", "value": "urn:ietf:params:oauth:grant-type:jwt-bearer", "type": "text" },
+                { "key": "assertion", "value": "{{FIN_DOMAIN_ID_JAG}}", "type": "text" },
+                { "key": "client_assertion_type", "value": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer", "type": "text" },
+                { "key": "client_assertion", "value": "{{FIN_WORKER_ASSERTION_DOMAIN_AS}}", "type": "text" }
+              ]
+            },
+            "url": "https://{{OKTA_DOMAIN}}/oauth2/{{FIN_DOMAIN_AUTHZ_SERVER_ID}}/v1/token"
+          }
+        },
+        {
+          "name": "4.6 Finance MCP — get_budget",
+          "request": {
+            "method": "POST",
+            "description": "Example MCP tool call to the Finance resource server using the validated Finance resource token.",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{FIN_RESOURCE_TOKEN}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"jsonrpc\": \"2.0\",\n  \"id\": 1,\n  \"method\": \"tools/call\",\n  \"params\": {\n    \"name\": \"get_budget\",\n    \"arguments\": {}\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{FIN_MCP_SERVER_URL}}/mcp"
+          }
+        }
+      ]
+    }
+  ]
+}

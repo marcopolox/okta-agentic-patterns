@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80">
+  <g fill="none" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.1">
+    <!-- Gear/cog -->
+    <circle cx="40" cy="40" r="9"/>
+    <circle cx="40" cy="40" r="4"/>
+    <!-- teeth -->
+    <line x1="40" y1="27" x2="40" y2="31"/>
+    <line x1="40" y1="49" x2="40" y2="53"/>
+    <line x1="27" y1="40" x2="31" y2="40"/>
+    <line x1="49" y1="40" x2="53" y2="40"/>
+    <line x1="30.4" y1="30.4" x2="33.2" y2="33.2"/>
+    <line x1="46.8" y1="46.8" x2="49.6" y2="49.6"/>
+    <line x1="49.6" y1="30.4" x2="46.8" y2="33.2"/>
+    <line x1="33.2" y1="46.8" x2="30.4" y2="49.6"/>
+  </g>
+</svg>

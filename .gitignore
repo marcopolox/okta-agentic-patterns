@@ -1,0 +1,23 @@
+# Secrets — never commit
+.env
+.env.local
+*.env.local
+patterns/**/adapter-config/.env
+
+# AI assistant context files — not needed for running the app
+CLAUDE.md
+AGENTS.md
+.claude/
+.cursor/
+
+# Node
+node_modules/
+.next/
+dist/
+build/
+
+# Docker
+*.log
+
+# OS
+.DS_Store
