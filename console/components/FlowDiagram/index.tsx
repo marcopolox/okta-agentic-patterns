@@ -17,7 +17,7 @@ const diagrams: Record<PatternId, React.ReactNode> = {
   p5: <P5Diagram />,
   p6: <P6Diagram />,
   p7: <P7Diagram />,
-  p8: <P8Diagram />,
+  p8: null,
 };
 
 export function FlowDiagram({ patternId, animate = false, fill = false, mission = 2 }: FlowDiagramProps) {
@@ -439,15 +439,69 @@ function P4Diagram() {
 }
 
 function P5Diagram() {
+  const cyan = "#22d3ee";
+  const amber = "#f59e0b";
+  const green = "#10b981";
+  const orange = "#fb923c";
+  const purple = "#a855f7";
+  const dashes = "4 3";
   return (
-    <svg viewBox="0 0 380 200" className="w-full max-w-sm">
-      <Node label="Human User" color="slate" x={60} y={50} />
-      <Arrow x1={115} y1={50} x2={185} y2={50} label="PKCE login" color="#22d3ee" />
-      <Node label="Okta SSO" sub="GitHub Ent. OIN" color="amber" x={240} y={50} />
-      <Arrow x1={240} y1={80} x2={240} y2={120} label="delegated token" color="#10b981" />
-      <Node label="AI Agent" sub="acts on behalf" color="cyan" x={240} y={150} />
-      <Arrow x1={295} y1={150} x2={335} y2={150} label="GitHub API" color="#10b981" />
-      <Node label="GitHub Ent." color="emerald" x={355} y={150} />
+    <svg viewBox="0 0 520 270" className="w-full max-w-xl">
+      <defs>
+        <marker id="p5-c" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+          <path d="M0,0 L6,3 L0,6 Z" fill={cyan} />
+        </marker>
+        <marker id="p5-a" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+          <path d="M0,0 L6,3 L0,6 Z" fill={amber} />
+        </marker>
+        <marker id="p5-g" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+          <path d="M0,0 L6,3 L0,6 Z" fill={green} />
+        </marker>
+        <marker id="p5-o" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+          <path d="M0,0 L6,3 L0,6 Z" fill={orange} />
+        </marker>
+        <marker id="p5-p" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+          <path d="M0,0 L6,3 L0,6 Z" fill={purple} />
+        </marker>
+      </defs>
+
+      <Node label="Human User" color="slate" x={80} y={50} />
+      <Node label="Okta" sub="Org Server" color="amber" x={300} y={50} />
+      <Node label="P5 Agent" sub="Okta AI Agent" color="cyan" x={300} y={160} />
+      <Node label="Okta" sub="XAA / Custom AS" color="amber" x={460} y={160} />
+      <Node label="HR / Finance" sub="MCP Resource" color="emerald" x={300} y={245} />
+
+      {/* ① auth code: User → Okta */}
+      <line x1={132} y1={44} x2={248} y2={44} stroke={cyan} strokeWidth={1.5} strokeDasharray={dashes} markerEnd="url(#p5-c)" opacity={0.85} />
+      <text x={190} y={38} textAnchor="middle" fontSize={9} fill={cyan} fontWeight="500">① auth code</text>
+
+      {/* ② id_token: Okta → Agent (left lane down) */}
+      <line x1={288} y1={68} x2={288} y2={142} stroke={cyan} strokeWidth={1.5} strokeDasharray={dashes} markerEnd="url(#p5-c)" opacity={0.85} />
+      <text x={282} y={107} textAnchor="end" fontSize={9} fill={cyan} fontWeight="500">② id_token</text>
+
+      {/* ③ sensitive request: User → Agent (diagonal) */}
+      <path d="M 132 60 L 248 148" stroke={amber} strokeWidth={1.5} strokeDasharray={dashes} fill="none" markerEnd="url(#p5-a)" opacity={0.85} />
+      <text x={172} y={112} textAnchor="middle" fontSize={9} fill={amber} fontWeight="500" transform="rotate(-36 172 112)">③ sensitive request</text>
+
+      {/* ④ approval needed: Agent → User */}
+      <path d="M 248 172 L 132 76" stroke={orange} strokeWidth={1.5} strokeDasharray={dashes} fill="none" markerEnd="url(#p5-o)" opacity={0.85} />
+      <text x={208} y={130} textAnchor="middle" fontSize={9} fill={orange} fontWeight="500" transform="rotate(-36 208 130)">④ approval?</text>
+
+      {/* ⑤ approve: User → Agent (arc via top for clarity) */}
+      <path d="M 80 68 L 80 175 L 248 175" stroke={green} strokeWidth={1.5} strokeDasharray={dashes} fill="none" markerEnd="url(#p5-g)" opacity={0.85} />
+      <text x={58} y={130} textAnchor="middle" fontSize={9} fill={green} fontWeight="500">⑤ approve</text>
+
+      {/* ⑥ ID-JAG exchange: Agent → XAA */}
+      <line x1={352} y1={152} x2={408} y2={152} stroke={purple} strokeWidth={1.5} strokeDasharray={dashes} markerEnd="url(#p5-p)" opacity={0.85} />
+      <text x={380} y={146} textAnchor="middle" fontSize={9} fill={purple} fontWeight="500">⑥ ID-JAG</text>
+
+      {/* access token: XAA → Agent */}
+      <line x1={408} y1={166} x2={352} y2={166} stroke={green} strokeWidth={1.5} strokeDasharray={dashes} markerEnd="url(#p5-g)" opacity={0.85} />
+      <text x={380} y={179} textAnchor="middle" fontSize={9} fill={green} fontWeight="500">access token</text>
+
+      {/* ⑦ execute: Agent → HR/Finance */}
+      <line x1={300} y1={196} x2={300} y2={227} stroke={green} strokeWidth={1.5} strokeDasharray={dashes} markerEnd="url(#p5-g)" opacity={0.85} />
+      <text x={312} y={213} textAnchor="start" fontSize={9} fill={green} fontWeight="500">⑦ execute</text>
     </svg>
   );
 }
@@ -593,20 +647,6 @@ function P7Diagram() {
       {/* Agent → HR/Finance */}
       <Arrow x1={305} y1={118} x2={398} y2={220} label="XAA token" color="#a855f7" />
       <Node label="HR / Finance" sub="MCP server" color="emerald" x={450} y={235} />
-    </svg>
-  );
-}
-
-function P8Diagram() {
-  return (
-    <svg viewBox="0 0 400 220" className="w-full max-w-sm">
-      <Node label="Okta" sub="identity layer" color="cyan" x={70} y={110} />
-      <Arrow x1={125} y1={70} x2={195} y2={40} label="XAA / OAuth" color="#22d3ee" />
-      <Arrow x1={125} y1={110} x2={195} y2={110} label="XAA / OAuth" color="#a855f7" />
-      <Arrow x1={125} y1={150} x2={195} y2={180} label="XAA / OAuth" color="#f59e0b" />
-      <Node label="AWS Bedrock" sub="Agents" color="emerald" x={280} y={40} />
-      <Node label="Salesforce" sub="Agentforce" color="emerald" x={280} y={110} />
-      <Node label="Microsoft" sub="Copilot Studio" color="emerald" x={280} y={180} />
     </svg>
   );
 }

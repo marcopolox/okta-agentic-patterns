@@ -3,7 +3,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { z } from "zod";
-import { INVENTORY_THEMES } from "./industries";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { INVENTORY_THEMES } from "./industries/index.js";
 
 const PORT = parseInt(process.env.PORT ?? "3103");
 const EVENT_BUS_URL = process.env.EVENT_BUS_URL ?? "http://localhost:4000";
@@ -23,13 +24,19 @@ const PUBLIC_TOOLS = new Set(["get_product_catalog"]);
 const JWKS = createRemoteJWKSet(new URL(`${OKTA_ISSUER}/v1/keys`));
 const recentlyValidated = new Set<string>();
 
+// Scopes emitted events to the viewer session behind the request currently in flight
+// (set from the X-Session-Id header the calling agent forwards), so concurrent
+// browsers watching the same pattern don't see each other's tool-call events.
+const sessionCtx = new AsyncLocalStorage<{ sessionId?: string }>();
+
 async function emitEvent(actor: string, action: string, target: string, detail?: string, tokenSnippet?: string, level = "auth") {
+  const sessionId = sessionCtx.getStore()?.sessionId;
   try {
     await Promise.all(PATTERN_IDS.map((patternId) =>
       fetch(`${EVENT_BUS_URL}/emit`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ patternId, actor, action, target, detail, tokenSnippet, level }),
+        body: JSON.stringify({ patternId, actor, action, target, detail, tokenSnippet, level, sessionId }),
       })
     ));
   } catch {
@@ -88,12 +95,6 @@ async function validateToken(authHeader: string | undefined): Promise<TokenClaim
   return { sub, act: act?.sub ? { sub: act.sub } : undefined };
 }
 
-function stockStatus(inStock: number, reorderPoint: number): string {
-  if (inStock === 0) return "out_of_stock";
-  if (inStock <= reorderPoint) return "low_stock";
-  return "in_stock";
-}
-
 function createMcpServer() {
   const server = new McpServer({ name: "inventory-resource-server", version: "1.0.0" });
 
@@ -119,7 +120,7 @@ function createMcpServer() {
       const inv = getData().inventory.find((i) => i.sku.toLowerCase() === sku.toLowerCase());
       if (!inv) return { content: [{ type: "text", text: `SKU ${sku} not found` }] };
       const available = inv.inStock - inv.reserved;
-      const result = { ...inv, available, status: stockStatus(inv.inStock, inv.reorderPoint) };
+      const result = { ...inv, available };
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     }
   );
@@ -137,7 +138,7 @@ function createMcpServer() {
       const result = {
         ...product,
         stock: inv
-          ? { inStock: inv.inStock, reserved: inv.reserved, available: inv.inStock - inv.reserved, warehouse: inv.warehouse, status: stockStatus(inv.inStock, inv.reorderPoint) }
+          ? { inStock: inv.inStock, reserved: inv.reserved, available: inv.inStock - inv.reserved, status: inv.status }
           : null,
       };
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
@@ -150,7 +151,7 @@ function createMcpServer() {
     { order_id: z.string().describe("Order ID") },
     async ({ order_id }) => {
       await emitEvent("Inventory Server", "called tool", "get_order_status", `id=${order_id}`, undefined, "info");
-      const order = getData().orders.find((o) => o.id.toLowerCase() === order_id.toLowerCase());
+      const order = getData().orders.find((o) => o.orderId.toLowerCase() === order_id.toLowerCase());
       if (!order) return { content: [{ type: "text", text: `Order ${order_id} not found` }] };
       return { content: [{ type: "text", text: JSON.stringify(order, null, 2) }] };
     }
@@ -291,6 +292,8 @@ app.get("/.well-known/oauth-authorization-server", (req, res) => {
 });
 
 app.all("/mcp", async (req, res) => {
+  const xSessionId = typeof req.headers["x-session-id"] === "string" ? req.headers["x-session-id"] : undefined;
+  sessionCtx.enterWith({ sessionId: xSessionId });
   const method = req.body?.method as string | undefined;
   // Only require auth for tool calls to non-public tools; everything else (initialize, notifications, tools/list) passes through
   const isProtectedToolCall = method === "tools/call" && !PUBLIC_TOOLS.has(req.body?.params?.name);

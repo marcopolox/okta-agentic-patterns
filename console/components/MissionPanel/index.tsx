@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import { Play, Clock, Loader2, Lock, LogIn } from "lucide-react";
 import { PatternId } from "@/lib/patterns";
+import { useDemoCredentials } from "@/lib/demo-settings";
 
 export interface Mission {
   id: string;
@@ -19,6 +20,7 @@ export interface Mission {
 interface MissionPanelProps {
   agentUrl: string;
   patternId: PatternId;
+  viewerSessionId?: string;
   disabled: boolean;
   disabledReason: string;
   missions: Mission[];
@@ -27,11 +29,13 @@ interface MissionPanelProps {
   onMissionSelect: (id: string | null) => void;
   resourcesSlot?: React.ReactNode;
   onRunStart?: () => void;
+  onRunStateChange?: (cancel: (() => void) | null) => void;
 }
 
 export function MissionPanel({
   agentUrl,
   patternId,
+  viewerSessionId,
   disabled,
   disabledReason,
   missions,
@@ -40,12 +44,14 @@ export function MissionPanel({
   onMissionSelect,
   resourcesSlot,
   onRunStart,
+  onRunStateChange,
 }: MissionPanelProps) {
   const [runningId, setRunningId] = useState<string | null>(null);
   const [result, setResult] = useState<string>("");
   const [lastRanId, setLastRanId] = useState<string | null>(null);
   const sessionId = useRef(`${patternId}-${Date.now()}`);
   const resultEndRef = useRef<HTMLDivElement>(null);
+  const { credentialHeaders } = useDemoCredentials();
 
   useEffect(() => {
     resultEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -57,6 +63,8 @@ export function MissionPanel({
     setResult("");
     setLastRanId(mission.id);
     onRunStart?.();
+    const controller = new AbortController();
+    onRunStateChange?.(() => controller.abort());
 
     try {
       const url = mission.apiRoute ?? `${agentUrl}/chat`;
@@ -64,9 +72,11 @@ export function MissionPanel({
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          ...credentialHeaders,
           ...(!mission.apiRoute && userToken ? { Authorization: `Bearer ${userToken}` } : {}),
         },
-        body: JSON.stringify({ message: mission.prompt, session_id: sessionId.current }),
+        body: JSON.stringify({ message: mission.prompt, session_id: sessionId.current, viewer_session_id: viewerSessionId }),
+        signal: controller.signal,
       });
 
       if (!res.ok || !res.body) {
@@ -85,9 +95,12 @@ export function MissionPanel({
         setResult(accumulated);
       }
     } catch (err) {
-      setResult(`Error: ${err instanceof Error ? err.message : "Unknown error"}`);
+      if (!controller.signal.aborted) {
+        setResult(`Error: ${err instanceof Error ? err.message : "Unknown error"}`);
+      }
     } finally {
       setRunningId(null);
+      onRunStateChange?.(null);
     }
   }
 

@@ -2,14 +2,32 @@ export const runtime = "edge";
 
 import { NextRequest } from "next/server";
 
-export async function GET(
-  _req: NextRequest,
+const eventBusBase = () =>
+  process.env.EVENT_BUS_INTERNAL_URL ?? "http://localhost:4000";
+
+export async function DELETE(
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const eventBusBase =
-    process.env.EVENT_BUS_INTERNAL_URL ?? "http://localhost:4000";
-  const upstream = `${eventBusBase}/events/${id}`;
+  const sessionId = req.nextUrl.searchParams.get("sessionId");
+  const qs = sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : "";
+  try {
+    await fetch(`${eventBusBase()}/events/${id}${qs}`, { method: "DELETE" });
+  } catch {
+    // event-bus unreachable — not fatal; local state cleared by caller
+  }
+  return new Response(null, { status: 204 });
+}
+
+export async function GET(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id } = await params;
+  const sessionId = req.nextUrl.searchParams.get("sessionId");
+  const qs = sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : "";
+  const upstream = `${eventBusBase()}/events/${id}${qs}`;
 
   let upstreamRes: Response;
   try {

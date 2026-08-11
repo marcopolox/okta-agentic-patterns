@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { Copy, Check, Terminal } from "lucide-react";
+import { copyToClipboard as copyText } from "@/lib/clipboard";
 
 interface ConnectionGuideProps {
   adapterUrl: string;
@@ -20,10 +21,11 @@ export function ConnectionGuide({ adapterUrl, variant = "developer-tools" }: Con
     2
   );
 
-  function copyToClipboard(text: string, key: string) {
-    navigator.clipboard.writeText(text);
-    setCopied(key);
-    setTimeout(() => setCopied(null), 2000);
+  async function copyToClipboard(text: string, key: string) {
+    if (await copyText(text)) {
+      setCopied(key);
+      setTimeout(() => setCopied(null), 2000);
+    }
   }
 
   function CodeBlock({ text, copyKey }: { text: string; copyKey: string }) {

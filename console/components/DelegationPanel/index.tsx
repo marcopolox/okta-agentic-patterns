@@ -16,9 +16,10 @@ const FINANCE_TOOLS = [
 interface Props {
   userToken: string | null;
   compact?: boolean;
+  viewerSessionId?: string;
 }
 
-export function DelegationPanel({ userToken, compact }: Props) {
+export function DelegationPanel({ userToken, compact, viewerSessionId }: Props) {
   const [delegations, setDelegations] = useState<Record<string, boolean>>({});
   const [pending, setPending] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
@@ -27,7 +28,8 @@ export function DelegationPanel({ userToken, compact }: Props) {
   const fetchDelegations = useCallback(async () => {
     if (!userToken) return;
     try {
-      const res = await fetch("/api/p7/delegations", {
+      const qs = viewerSessionId ? `?viewer_session_id=${encodeURIComponent(viewerSessionId)}` : "";
+      const res = await fetch(`/api/p7/delegations${qs}`, {
         headers: { Authorization: `Bearer ${userToken}` },
       });
       if (res.ok) {
@@ -42,7 +44,7 @@ export function DelegationPanel({ userToken, compact }: Props) {
     } finally {
       setLoading(false);
     }
-  }, [userToken]);
+  }, [userToken, viewerSessionId]);
 
   useEffect(() => {
     fetchDelegations();
@@ -62,7 +64,7 @@ export function DelegationPanel({ userToken, compact }: Props) {
           "Content-Type": "application/json",
           Authorization: `Bearer ${userToken}`,
         },
-        body: JSON.stringify({ tool }),
+        body: JSON.stringify({ tool, viewer_session_id: viewerSessionId }),
       });
       if (!res.ok) {
         // Revert on failure

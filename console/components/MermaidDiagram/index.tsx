@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { ZoomIn, ZoomOut, RotateCcw, Copy, Check } from "lucide-react";
+import { copyToClipboard } from "@/lib/clipboard";
 
 interface Props {
   chart: string;
@@ -17,13 +18,13 @@ export function MermaidDiagram({ chart }: Props) {
   const [scale, setScale] = useState(1);
   const [copied, setCopied] = useState(false);
 
-  function copyChart() {
+  async function copyChart() {
     const stripped = chart.replace(/rect rgb\([^)]*\)/g, "rect rgb(235, 242, 255)");
     const lightChart = `%%{init: {"theme": "default"}}%%\n${stripped}`;
-    navigator.clipboard.writeText(lightChart).then(() => {
+    if (await copyToClipboard(lightChart)) {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-    });
+    }
   }
 
   useEffect(() => {

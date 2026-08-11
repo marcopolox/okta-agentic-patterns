@@ -19,6 +19,7 @@ interface PresetGroup {
 interface ChatPanelProps {
   agentUrl: string;
   patternId: string;
+  viewerSessionId?: string;
   disabled?: boolean;
   disabledReason?: string;
   presetPrompts?: string[];
@@ -27,11 +28,13 @@ interface ChatPanelProps {
   onMessageSent?: () => void;
   preserveSessionOnNavigation?: boolean;
   authStatus?: React.ReactNode;
+  onRunStateChange?: (cancel: (() => void) | null) => void;
 }
 
 export function ChatPanel({
   agentUrl,
   patternId,
+  viewerSessionId,
   disabled = false,
   disabledReason,
   presetPrompts,
@@ -40,6 +43,7 @@ export function ChatPanel({
   onMessageSent,
   preserveSessionOnNavigation = false,
   authStatus,
+  onRunStateChange,
 }: ChatPanelProps) {
   const { credentialHeaders } = useDemoCredentials();
   const [messages, setMessages] = useState<Message[]>([]);
@@ -117,6 +121,8 @@ export function ChatPanel({
     // indicator appears before the fetch even resolves.
     setMessages((prev) => [...prev, { role: "user", content: text }, { role: "assistant", content: "" }]);
     setLoading(true);
+    const controller = new AbortController();
+    onRunStateChange?.(() => controller.abort());
 
     try {
       const res = await fetch(`/api/chat/${patternId}`, {
@@ -126,7 +132,8 @@ export function ChatPanel({
           ...(userToken ? { Authorization: `Bearer ${userToken}` } : {}),
           ...credentialHeaders,
         },
-        body: JSON.stringify({ message: text, session_id: sessionId.current }),
+        body: JSON.stringify({ message: text, session_id: sessionId.current, viewer_session_id: viewerSessionId }),
+        signal: controller.signal,
       });
 
       if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
@@ -146,13 +153,16 @@ export function ChatPanel({
         });
       }
     } catch (err) {
-      setMessages((prev) => {
-        const updated = [...prev];
-        updated[updated.length - 1] = { role: "assistant", content: `Error: ${err instanceof Error ? err.message : "Unknown error"}` };
-        return updated;
-      });
+      if (!controller.signal.aborted) {
+        setMessages((prev) => {
+          const updated = [...prev];
+          updated[updated.length - 1] = { role: "assistant", content: `Error: ${err instanceof Error ? err.message : "Unknown error"}` };
+          return updated;
+        });
+      }
     } finally {
       setLoading(false);
+      onRunStateChange?.(null);
     }
   }
 

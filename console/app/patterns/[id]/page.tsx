@@ -15,6 +15,15 @@ export default async function PatternPage({ params }: Props) {
   const pattern = getPattern(id);
   if (!pattern) notFound();
 
+  if (pattern.disabled) {
+    return (
+      <main className="relative flex h-full flex-col items-center justify-center px-6 py-3 text-center">
+        <p className="text-lg font-medium text-slate-300">This use case is not accessible yet.</p>
+        <p className="mt-2 text-sm text-slate-500">Check back soon.</p>
+      </main>
+    );
+  }
+
   let active = false;
   const healthUrl = pattern.agentHealthUrl ?? pattern.agentUrl;
   if (healthUrl) {
@@ -44,10 +53,12 @@ export default async function PatternPage({ params }: Props) {
   const industryId = cookieStore.get("demo_industry")?.value ?? DEFAULT_INDUSTRY_ID;
   const industryOverrides = getIndustryOverrides(industryId);
 
+  const adapterConfigured = !pattern.requiresAdapter || !!process.env.MCP_ADAPTER_URL;
+
   return (
-    <main className="relative flex h-screen flex-col overflow-hidden px-6 py-3">
+    <main className="relative flex h-full flex-col overflow-hidden px-6 py-3">
       <div className="mx-auto w-full max-w-6xl flex-1 min-h-0">
-        <PatternInteraction pattern={pattern} active={active} userToken={userToken} themeOverrides={industryOverrides} />
+        <PatternInteraction pattern={pattern} active={active} userToken={userToken} themeOverrides={industryOverrides} adapterConfigured={adapterConfigured} />
       </div>
     </main>
   );

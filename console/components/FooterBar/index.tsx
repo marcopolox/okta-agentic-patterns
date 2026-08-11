@@ -6,8 +6,8 @@ export default function FooterBar() {
   const pre  = s.slice(0, heart).map(n => String.fromCharCode(n)).join('');
   const post = s.slice(heart + 1).map(n => String.fromCharCode(n)).join('');
   return (
-    <p className="text-[10px] text-white/20 tracking-wide whitespace-nowrap">
-      {pre}<span className="text-rose-400/50">{String.fromCharCode(9829)}</span>{post}
+    <p className="text-[10px] text-white/50 tracking-wide whitespace-nowrap">
+      {pre}<span className="text-rose-400/80">{String.fromCharCode(9829)}</span>{post}
     </p>
   );
 }

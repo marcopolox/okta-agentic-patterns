@@ -4,6 +4,7 @@ import OpenAI from "openai";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { SignJWT, importJWK, importPKCS8 } from "jose";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 const PORT = parseInt(process.env.PORT ?? "3500");
 const EVENT_BUS_URL = process.env.EVENT_BUS_URL ?? "http://localhost:4000";
@@ -24,12 +25,19 @@ class CibaDeniedError extends Error {
   constructor() { super("CIBA denied by user"); }
 }
 
+// Scopes emitted events to the viewer session that triggered the request currently
+// in flight, so concurrent browsers watching this pattern don't see each other's events.
+const sessionCtx = new AsyncLocalStorage<{ sessionId?: string }>();
+
 async function emitEvent(actor: string, action: string, target: string, detail?: string, tokenSnippet?: string, level = "auth", token?: string) {
   try {
     await fetch(`${EVENT_BUS_URL}/emit`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ patternId: PATTERN_ID, actor, action, target, detail, tokenSnippet, level, token }),
+      body: JSON.stringify({
+        patternId: PATTERN_ID, actor, action, target, detail, tokenSnippet, level, token,
+        sessionId: sessionCtx.getStore()?.sessionId,
+      }),
     });
   } catch {
     // Non-fatal
@@ -182,12 +190,14 @@ async function pollCibaToken(auth_req_id: string): Promise<"pending" | string> {
 }
 
 // Full CIBA flow: initiate → poll until approved/denied/timeout
-async function runCibaApproval(loginHint: string, bindingMessage: string): Promise<string> {
+async function runCibaApproval(loginHint: string, bindingMessage: string, signal?: AbortSignal): Promise<string> {
   const { auth_req_id, interval } = await initiateCiba(loginHint, bindingMessage);
 
   const maxAttempts = Math.ceil(120 / interval);
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (signal?.aborted) throw new Error("CIBA approval cancelled — client disconnected");
     await new Promise((resolve) => setTimeout(resolve, interval * 1000));
+    if (signal?.aborted) throw new Error("CIBA approval cancelled — client disconnected");
     const result = await pollCibaToken(auth_req_id);
     if (result !== "pending") {
       const snippet = result.slice(0, 12) + "..." + result.slice(-8);
@@ -234,6 +244,8 @@ async function callInventoryTool(name: string, args: Record<string, unknown>, to
 
   const headers: Record<string, string> = { "X-Pattern-Id": PATTERN_ID };
   if (token) headers["Authorization"] = `Bearer ${token}`;
+  const viewerSessionId = sessionCtx.getStore()?.sessionId;
+  if (viewerSessionId) headers["X-Session-Id"] = viewerSessionId;
 
   const transport = new StreamableHTTPClientTransport(
     new URL(`${INVENTORY_API_URL}/mcp`),
@@ -280,7 +292,8 @@ async function* runAgentLoop(
   history: Message[],
   tools: ToolDef[],
   ctx: RequestContext,
-  overrides?: LLMOverrides
+  overrides?: LLMOverrides,
+  signal?: AbortSignal
 ): AsyncGenerator<string> {
   const messages: Message[] = [...history, { role: "user", content: userMessage }];
   const isFirstMessage = history.length === 0;
@@ -288,9 +301,9 @@ async function* runAgentLoop(
   const system = `${greetInstruction}You are a helpful inventory assistant acting on behalf of ${ctx.userEmail}. Use the available tools to answer questions about products, stock levels, and orders. For stock updates, explain what you're doing before calling the tool. Be concise and format responses as readable markdown. When presenting product or inventory data, use tables.`;
 
   if (overrides?.anthropicKey || process.env.ANTHROPIC_API_KEY) {
-    yield* runAnthropic(messages, system, tools, ctx, overrides);
+    yield* runAnthropic(messages, system, tools, ctx, overrides, signal);
   } else if (overrides?.openaiKey || process.env.OPENAI_API_KEY) {
-    yield* runOpenAI(messages, system, tools, ctx, overrides);
+    yield* runOpenAI(messages, system, tools, ctx, overrides, signal);
   } else {
     yield "No LLM API key configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY.";
   }
@@ -301,7 +314,8 @@ async function* runAnthropic(
   system: string,
   tools: ToolDef[],
   ctx: RequestContext,
-  overrides?: LLMOverrides
+  overrides?: LLMOverrides,
+  signal?: AbortSignal
 ): AsyncGenerator<string> {
   const anthropic = new Anthropic({ ...(overrides?.anthropicKey && { apiKey: overrides.anthropicKey }) });
   const anthropicTools: Anthropic.Tool[] = tools.map((t) => ({
@@ -313,6 +327,7 @@ async function* runAnthropic(
   let msgs: Anthropic.MessageParam[] = messages.map((m) => ({ role: m.role, content: m.content }));
 
   while (true) {
+    if (signal?.aborted) return;
     const response = await anthropic.messages.create({
       model: process.env.ANTHROPIC_MODEL ?? "claude-opus-4-7",
       max_tokens: 4096,
@@ -330,6 +345,7 @@ async function* runAnthropic(
     const toolResults: Anthropic.ToolResultBlockParam[] = [];
 
     for (const tool of toolBlocks) {
+      if (signal?.aborted) { toolResults.push({ type: "tool_result", tool_use_id: tool.id, content: "cancelled" }); continue; }
       const args = tool.input as Record<string, unknown>;
 
       if (WRITE_TOOLS.has(tool.name)) {
@@ -339,7 +355,7 @@ async function* runAnthropic(
         await emitEvent("P5 Agent", "CIBA initiated", "Okta CIBA AS", `tool=${tool.name}`, undefined, "auth");
 
         try {
-          const cibaToken = await runCibaApproval(ctx.userEmail, actionDesc);
+          const cibaToken = await runCibaApproval(ctx.userEmail, actionDesc, signal);
           await emitEvent("P5 Agent", "CIBA approved", "Android app", `tool=${tool.name}`, undefined, "auth");
           yield `\n✅ **Approved.** Executing...\n\n`;
           const result = await callInventoryTool(tool.name, args, cibaToken);
@@ -377,7 +393,8 @@ async function* runOpenAI(
   system: string,
   tools: ToolDef[],
   ctx: RequestContext,
-  overrides?: LLMOverrides
+  overrides?: LLMOverrides,
+  signal?: AbortSignal
 ): AsyncGenerator<string> {
   const openai = new OpenAI({ ...(overrides?.openaiKey && { apiKey: overrides.openaiKey }) });
   const openaiTools: OpenAI.ChatCompletionTool[] = tools.map((t) => ({
@@ -391,6 +408,7 @@ async function* runOpenAI(
   ];
 
   while (true) {
+    if (signal?.aborted) return;
     const response = await openai.chat.completions.create({
       model: process.env.OPENAI_MODEL ?? "gpt-4o",
       messages: msgs,
@@ -404,6 +422,7 @@ async function* runOpenAI(
     const toolResults: OpenAI.ChatCompletionToolMessageParam[] = [];
 
     for (const tc of choice.message.tool_calls) {
+      if (signal?.aborted) { toolResults.push({ role: "tool", tool_call_id: tc.id, content: "cancelled" }); continue; }
       const args = JSON.parse(tc.function.arguments) as Record<string, unknown>;
 
       if (WRITE_TOOLS.has(tc.function.name)) {
@@ -413,7 +432,7 @@ async function* runOpenAI(
         await emitEvent("P5 Agent", "CIBA initiated", "Okta CIBA AS", `tool=${tc.function.name}`, undefined, "auth");
 
         try {
-          const cibaToken = await runCibaApproval(ctx.userEmail, actionDesc);
+          const cibaToken = await runCibaApproval(ctx.userEmail, actionDesc, signal);
           await emitEvent("P5 Agent", "CIBA approved", "Android app", `tool=${tc.function.name}`, undefined, "auth");
           yield `\n✅ **Approved.** Executing...\n\n`;
           const result = await callInventoryTool(tc.function.name, args, cibaToken);
@@ -457,12 +476,13 @@ app.get("/health", (_req, res) => {
 });
 
 app.post("/chat", async (req, res) => {
-  const { message, session_id } = req.body as { message: string; session_id?: string };
+  const { message, session_id, viewer_session_id } = req.body as { message: string; session_id?: string; viewer_session_id?: string };
 
   if (!message) {
     res.status(400).json({ error: "message required" });
     return;
   }
+  sessionCtx.enterWith({ sessionId: viewer_session_id });
 
   const llmOverrides: LLMOverrides = {
     anthropicKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] !== "openai"
@@ -493,6 +513,13 @@ app.post("/chat", async (req, res) => {
   res.setHeader("Content-Type", "text/plain; charset=utf-8");
   res.setHeader("Transfer-Encoding", "chunked");
 
+  const controller = new AbortController();
+  // req 'close' fires as soon as the request body is read, not when the response
+  // finishes — aborting on it kills the LLM call almost immediately on every
+  // request. res 'close' fires when the connection actually ends; writableEnded
+  // distinguishes a normal finish from a real client disconnect.
+  res.on("close", () => { if (!res.writableEnded) controller.abort(); });
+
   try {
     // Discover tools
     let tools: ToolDef[];
@@ -519,7 +546,7 @@ app.post("/chat", async (req, res) => {
     const ctx: RequestContext = { userIdToken, userEmail, readToken };
 
     let fullResponse = "";
-    for await (const chunk of runAgentLoop(message, history, tools, ctx, llmOverrides)) {
+    for await (const chunk of runAgentLoop(message, history, tools, ctx, llmOverrides, controller.signal)) {
       fullResponse += chunk;
       res.write(chunk);
     }

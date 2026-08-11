@@ -4,6 +4,8 @@ import OpenAI from "openai";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { SignJWT, importJWK, importPKCS8 } from "jose";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { randomUUID } from "node:crypto";
 
 const PORT = parseInt(process.env.PORT ?? "3300");
 const EVENT_BUS_URL = process.env.EVENT_BUS_URL ?? "http://localhost:4000";
@@ -205,12 +207,19 @@ async function loadAgentConnections(): Promise<void> {
   }
 }
 
-async function emitEvent(actor: string, action: string, target: string, detail?: string, tokenSnippet?: string, level = "auth", token?: string) {
+// Scopes emitted events to the viewer session that triggered the request currently
+// in flight, so concurrent browsers watching this pattern don't see each other's events.
+const sessionCtx = new AsyncLocalStorage<{ sessionId?: string }>();
+
+async function emitEvent(actor: string, action: string, target: string, detail?: string, tokenSnippet?: string, level = "auth", token?: string, callId?: string) {
   try {
     await fetch(`${EVENT_BUS_URL}/emit`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ patternId: PATTERN_ID, actor, action, target, detail, tokenSnippet, level, token }),
+      body: JSON.stringify({
+        patternId: PATTERN_ID, actor, action, target, detail, tokenSnippet, level, token, callId,
+        sessionId: sessionCtx.getStore()?.sessionId,
+      }),
     });
   } catch {
     // Non-fatal
@@ -465,13 +474,18 @@ interface ToolDef {
   inputSchema: Record<string, unknown>;
 }
 
-// Discover tools via GET /tools (no auth) — avoids eagerly fetching tokens for servers not needed
+// Discover tools via GET /tools (no auth) — avoids eagerly fetching tokens for servers not needed.
+// P3 always attaches a real user's token to every tool call, so tools that require no scopes
+// (e.g. Finance's get_fiscal_summary, HR's get_headcount) are filtered out here — calling them
+// would be pointless given the user is already authenticated, and confusing in the event log.
 async function discoverToolsViaRest(serverUrl: string, label: string): Promise<ToolDef[]> {
   const resp = await fetch(`${serverUrl}/tools`);
   if (!resp.ok) throw new Error(`Tool discovery failed for ${label}: ${resp.status}`);
-  const { tools } = await resp.json() as { tools: Array<{ name: string; description: string; inputSchema?: Record<string, unknown> }> };
-  await emitEvent("P3 Agent", "discovered tools", label, `count=${tools.length}`, undefined, "info");
-  return tools.map((t) => ({
+  const { tools } = await resp.json() as { tools: Array<{ name: string; description: string; inputSchema?: Record<string, unknown>; requiredScopes?: string[] }> };
+  const scopedTools = tools.filter((t) => (t.requiredScopes?.length ?? 0) > 0);
+  const skipped = tools.length - scopedTools.length;
+  await emitEvent("P3 Agent", "discovered tools", label, `count=${scopedTools.length}${skipped > 0 ? ` (${skipped} public tool(s) skipped)` : ""}`, undefined, "info");
+  return scopedTools.map((t) => ({
     name: t.name,
     description: t.description,
     inputSchema: t.inputSchema ?? { type: "object", properties: {} },
@@ -485,6 +499,7 @@ async function callMcpTool(name: string, args: Record<string, unknown>, ctx: Req
 
   const scopes = getScopesForTool(name, server.scopes);
   const label = `${server.label} Server`;
+  const callId = randomUUID().slice(0, 8);
 
   let token: string;
   try {
@@ -495,11 +510,17 @@ async function callMcpTool(name: string, args: Record<string, unknown>, ctx: Req
     return `Access to "${name}" is not permitted for this user due to an Okta policy restriction.`;
   }
 
-  await emitEvent("P3 Agent", "calling tool", label, `tool=${name} scopes=${scopes.join(",")}`, undefined, "info");
+  await emitEvent("P3 Agent", "calling tool", label, `tool=${name} scopes=${scopes.join(",")}`, undefined, "info", undefined, callId);
 
+  const viewerSessionId = sessionCtx.getStore()?.sessionId;
   const transport = new StreamableHTTPClientTransport(
     new URL(`${server.url}/mcp`),
-    { requestInit: { headers: { Authorization: `Bearer ${token}`, "X-Pattern-Id": PATTERN_ID } } }
+    { requestInit: { headers: {
+      Authorization: `Bearer ${token}`,
+      "X-Pattern-Id": PATTERN_ID,
+      ...(viewerSessionId ? { "X-Session-Id": viewerSessionId } : {}),
+      "X-Call-Id": callId,
+    } } }
   );
   const client = new Client({ name: "p3-agent", version: "1.0.0" });
   await client.connect(transport);
@@ -540,7 +561,8 @@ async function* runAgentLoop(
   tools: ToolDef[],
   userName: string,
   restrictionNote = "",
-  overrides?: LLMOverrides
+  overrides?: LLMOverrides,
+  signal?: AbortSignal
 ): AsyncGenerator<string> {
   const messages: Message[] = [...history, { role: "user", content: userMessage }];
   const isFirstMessage = history.length === 0;
@@ -549,9 +571,9 @@ async function* runAgentLoop(
   const system = `${greetInstruction}You are a helpful internal assistant acting on behalf of ${userName}. Use the available tools to answer questions about employees, departments, budgets, and finances.${slackNote}${restrictionNote} Be concise and informative. When presenting lists of employees or departments, format them as readable markdown tables or structured lists with clear headings — never dump raw JSON.`;
 
   if (overrides?.anthropicKey || process.env.ANTHROPIC_API_KEY) {
-    yield* runAnthropic(messages, system, callTool, tools, overrides);
+    yield* runAnthropic(messages, system, callTool, tools, overrides, signal);
   } else if (overrides?.openaiKey || process.env.OPENAI_API_KEY) {
-    yield* runOpenAI(messages, system, callTool, tools, overrides);
+    yield* runOpenAI(messages, system, callTool, tools, overrides, signal);
   } else {
     yield "No LLM API key configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY.";
   }
@@ -562,7 +584,8 @@ async function* runAnthropic(
   system: string,
   callTool: ToolExecutor,
   tools: ToolDef[],
-  overrides?: LLMOverrides
+  overrides?: LLMOverrides,
+  signal?: AbortSignal
 ): AsyncGenerator<string> {
   const anthropic = new Anthropic({ ...(overrides?.anthropicKey && { apiKey: overrides.anthropicKey }) });
   const anthropicTools: Anthropic.Tool[] = tools.map((t) => ({
@@ -574,6 +597,7 @@ async function* runAnthropic(
   let msgs: Anthropic.MessageParam[] = messages.map((m) => ({ role: m.role, content: m.content }));
 
   while (true) {
+    if (signal?.aborted) return;
     const response = await anthropic.messages.create({
       model: process.env.ANTHROPIC_MODEL ?? "claude-opus-4-7",
       max_tokens: 4096,
@@ -607,7 +631,8 @@ async function* runOpenAI(
   system: string,
   callTool: ToolExecutor,
   tools: ToolDef[],
-  overrides?: LLMOverrides
+  overrides?: LLMOverrides,
+  signal?: AbortSignal
 ): AsyncGenerator<string> {
   const openai = new OpenAI({ ...(overrides?.openaiKey && { apiKey: overrides.openaiKey }) });
   const openaiTools: OpenAI.ChatCompletionTool[] = tools.map((t) => ({
@@ -621,6 +646,7 @@ async function* runOpenAI(
   ];
 
   while (true) {
+    if (signal?.aborted) return;
     const response = await openai.chat.completions.create({
       model: process.env.OPENAI_MODEL ?? "gpt-4o",
       messages: msgs,
@@ -684,12 +710,13 @@ app.post("/refresh", async (_req, res) => {
 });
 
 app.post("/chat", async (req, res) => {
-  const { message, session_id } = req.body as { message: string; session_id?: string };
+  const { message, session_id, viewer_session_id } = req.body as { message: string; session_id?: string; viewer_session_id?: string };
 
   if (!message) {
     res.status(400).json({ error: "message required" });
     return;
   }
+  sessionCtx.enterWith({ sessionId: viewer_session_id });
 
   const llmOverrides: LLMOverrides = {
     anthropicKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] !== "openai"
@@ -723,12 +750,19 @@ app.post("/chat", async (req, res) => {
   res.setHeader("Content-Type", "text/plain; charset=utf-8");
   res.setHeader("Transfer-Encoding", "chunked");
 
+  const controller = new AbortController();
+  // req 'close' fires as soon as the request body is read, not when the response
+  // finishes — aborting on it kills the LLM call almost immediately on every
+  // request. res 'close' fires when the connection actually ends; writableEnded
+  // distinguishes a normal finish from a real client disconnect.
+  res.on("close", () => { if (!res.writableEnded) controller.abort(); });
+
   try {
     const ctx: RequestContext = { userIdToken, tokenCache: new Map() };
 
     // Build dynamic tool map from Okta-discovered connections
     const toolMap: DynamicToolMap = new Map();
-    let mcpTools: ToolDef[] = [];
+    const mcpTools: ToolDef[] = [];
     try {
       for (const server of discoveredServers) {
         const serverTools = await discoverToolsViaRest(server.url, `${server.label} Server`);
@@ -743,41 +777,29 @@ app.post("/chat", async (req, res) => {
       return;
     }
 
-    // Pre-check XAA read access for each discovered server; filter out tools for restricted servers
-    const restrictedServerLabels: string[] = [];
-    for (const server of discoveredServers) {
-      const readScopes = server.scopes.filter(s => s.endsWith(":read"));
-      const scopes = readScopes.length > 0 ? readScopes : server.scopes.slice(0, 1);
-      try {
-        await getTokenForServer(server, scopes, ctx);
-      } catch {
-        const label = `${server.label} Server`;
-        await emitEvent(label, "policy denied", "P3 Agent", "read access blocked by Okta", undefined, "error");
-        mcpTools = mcpTools.filter((t) => toolMap.get(t.name) !== server);
-        restrictedServerLabels.push(label);
-      }
-    }
-
     // Inactive connections were never added to discoveredServers; collect them so the LLM
-    // knows not to fabricate data for resources it has no tools for
+    // knows not to fabricate data for resources it has no tools for. Servers an Okta access
+    // policy denies are handled reactively in callMcpTool when a tool for them is actually called —
+    // minting tokens for every server up front would exchange XAA tokens for resources the
+    // request may never touch.
     const inactiveServerLabels = statusConnections
       .filter(c => !c.active && c.connectionType === "IDENTITY_ASSERTION_CUSTOM_AS")
       .map(c => `${c.label} Server`);
 
-    const allUnavailableLabels = [...restrictedServerLabels, ...inactiveServerLabels];
-    const restrictionNote = allUnavailableLabels.length > 0
-      ? ` IMPORTANT: The following resources are currently unavailable: ${allUnavailableLabels.join(", ")}. ${inactiveServerLabels.length > 0 ? `${inactiveServerLabels.join(" and ")} ${inactiveServerLabels.length === 1 ? "is" : "are"} inactive in Okta — no tools exist for ${inactiveServerLabels.length === 1 ? "it" : "them"}. ` : ""}Do NOT make up, estimate, or infer any data for unavailable resources. Always call available tools to retrieve whatever partial results you can. After presenting the data you were able to retrieve, add a clear note that the unavailable resource(s) could not be accessed${restrictedServerLabels.length > 0 ? " due to an Okta access policy" : " because the Okta connection is inactive"}.`
+    const restrictionNote = inactiveServerLabels.length > 0
+      ? ` IMPORTANT: The following resources are currently unavailable: ${inactiveServerLabels.join(", ")}. ${inactiveServerLabels.join(" and ")} ${inactiveServerLabels.length === 1 ? "is" : "are"} inactive in Okta — no tools exist for ${inactiveServerLabels.length === 1 ? "it" : "them"}. Do NOT make up, estimate, or infer any data for unavailable resources. Always call available tools to retrieve whatever partial results you can. After presenting the data you were able to retrieve, add a clear note that the unavailable resource(s) could not be accessed because the Okta connection is inactive.`
       : "";
 
     const tools: ToolDef[] = [...mcpTools, ...(SLACK_STS_RESOURCE ? SLACK_TOOLS : [])];
 
     const callTool: ToolExecutor = (name, args) => {
+      if (controller.signal.aborted) return Promise.resolve("cancelled");
       if (name.startsWith("slack_")) return callSlackTool(name, args, userIdToken);
       return callMcpTool(name, args, ctx, toolMap);
     };
 
     let fullResponse = "";
-    for await (const chunk of runAgentLoop(message, history, callTool, tools, userName, restrictionNote, llmOverrides)) {
+    for await (const chunk of runAgentLoop(message, history, callTool, tools, userName, restrictionNote, llmOverrides, controller.signal)) {
       fullResponse += chunk;
       res.write(chunk);
     }

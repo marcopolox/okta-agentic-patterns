@@ -1,8 +1,8 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
-import { LogIn, LogOut, X, ShieldOff, Loader2, Info, Play } from "lucide-react";
+import { LogIn, LogOut, X, ShieldOff, Loader2, Info, Play, AlertTriangle } from "lucide-react";
 import { Pattern, PatternId } from "@/lib/patterns";
 import { DemoEvent, subscribeToEvents } from "@/lib/event-bus";
 import { ChatPanel } from "@/components/ChatPanel";
@@ -31,6 +31,15 @@ const PRESET_PROMPTS: Partial<Record<PatternId, string[]>> = {
     "Add 50 units to the Portable SSD inventory",
   ],
 };
+
+// crypto.randomUUID() requires a secure context (HTTPS or localhost) — this demo
+// is often served over plain HTTP, so fall back to a non-cryptographic id.
+function generateViewerSessionId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
 
 type AgentServer = { label: string; connectionType?: string; active?: boolean };
 
@@ -99,9 +108,24 @@ function buildPresetGroups(
       groups.push({
         label: "Slack",
         prompts: [
+          "Post a message to Slack",
           ...(hasHR ? ["Post the Engineering team roster and their roles to Slack"] : []),
           ...(hasFinance ? ["Share the department budget overview on Slack"] : []),
-          ...(!hasHR && !hasFinance ? ["List Slack channels in my workspace"] : []),
+        ],
+      });
+    }
+
+    // Generic fallback for any other discovered resource not explicitly handled above
+    const knownLabels = ["hr", "finance", "slack", "github"];
+    const unknown = live.filter(
+      s => !knownLabels.some(k => s.label.toLowerCase().includes(k)),
+    );
+    for (const conn of unknown) {
+      groups.push({
+        label: conn.label,
+        prompts: [
+          `What can you do with ${conn.label}?`,
+          `Show me available data from ${conn.label}`,
         ],
       });
     }
@@ -489,9 +513,10 @@ interface Props {
   active: boolean;
   userToken?: string | null;
   themeOverrides?: IndustryOverrides;
+  adapterConfigured?: boolean;
 }
 
-export function PatternInteraction({ pattern, active, userToken, themeOverrides }: Props) {
+export function PatternInteraction({ pattern, active, userToken, themeOverrides, adapterConfigured = true }: Props) {
   const [events, setEvents] = useState<DemoEvent[]>([]);
   const [openDiagram, setOpenDiagram] = useState<DiagramModal>(null);
   const [openVideo, setOpenVideo] = useState<{ title: string; url: string } | null>(null);
@@ -513,6 +538,13 @@ export function PatternInteraction({ pattern, active, userToken, themeOverrides 
   }));
   const [refreshing, setRefreshing] = useState(false);
   const [infoOpen, setInfoOpen] = useState(false);
+  const activeAbortRef = useRef<(() => void) | null>(null);
+  // Stable per-tab identifier so this browser's live event stream and its own
+  // chat/mission activity stay scoped to it — never shared with another viewer
+  // running the same pattern concurrently.
+  const viewerSessionIdRef = useRef<string>("");
+  if (!viewerSessionIdRef.current) viewerSessionIdRef.current = generateViewerSessionId();
+  const viewerSessionId = viewerSessionIdRef.current;
 
   async function handleRefresh() {
     setRefreshing(true);
@@ -538,11 +570,12 @@ export function PatternInteraction({ pattern, active, userToken, themeOverrides 
   useEffect(() => {
     const unsubscribe = subscribeToEvents(
       pattern.id,
+      viewerSessionId,
       (ev) => setEvents((prev) => prev.some(e => e.id === ev.id) ? prev : [...prev.slice(-199), ev]),
       () => setEvents([]),
     );
     return unsubscribe;
-  }, [pattern.id]);
+  }, [pattern.id, viewerSessionId]);
 
   // Close modal / popover on Escape
   useEffect(() => {
@@ -665,10 +698,28 @@ export function PatternInteraction({ pattern, active, userToken, themeOverrides 
               variant={pattern.id === "p2" ? "consumer-agent" : "developer-tools"}
             />
           )}
-          {pattern.rightPanel === "chat" && pattern.requiresUserToken && !userToken && (
+          {pattern.rightPanel === "chat" && pattern.requiresAdapter && !adapterConfigured && (
+            <div className="flex h-full items-center justify-center rounded-xl border border-amber-700/40 bg-amber-900/10 p-8 text-center">
+              <div className="max-w-sm">
+                <AlertTriangle size={28} className="mx-auto mb-3 text-amber-500/70" />
+                <p className="mb-1 text-sm font-semibold text-amber-400">MCP Bridge not configured</p>
+                <p className="mb-4 text-xs text-slate-400 leading-relaxed">
+                  This pattern requires a deployed Okta MCP Adapter tied to your Okta tenant.
+                  Set its URL in <code className="text-amber-300">.env</code> and rebuild.
+                </p>
+                <code className="block rounded bg-gray-800/80 px-3 py-2 text-left text-xs text-slate-300">
+                  MCP_ADAPTER_URL=https://your-adapter.example.com
+                </code>
+                <p className="mt-3 text-xs text-slate-500">
+                  Then run: <code className="text-slate-400">docker compose --profile {pattern.id} up --build</code>
+                </p>
+              </div>
+            </div>
+          )}
+          {pattern.rightPanel === "chat" && pattern.requiresUserToken && !userToken && (!pattern.requiresAdapter || adapterConfigured) && (
             <UserLoginGate pattern={pattern} active={active} />
           )}
-          {pattern.rightPanel === "chat" && (!pattern.requiresUserToken || userToken) && (
+          {pattern.rightPanel === "chat" && (!pattern.requiresUserToken || userToken) && (!pattern.requiresAdapter || adapterConfigured) && (
             agentLoadState === "loading" ? (
               <AgentLoadingScreen message={agentLoadMessage} />
             ) : (
@@ -676,12 +727,14 @@ export function PatternInteraction({ pattern, active, userToken, themeOverrides 
                 key={userToken ?? "anonymous"}
                 agentUrl={pattern.agentUrl ?? ""}
                 patternId={pattern.id}
+                viewerSessionId={viewerSessionId}
                 disabled={!active}
                 disabledReason={`Start this pattern: docker compose --profile ${pattern.id} up`}
                 presetPrompts={themeOverrides?.presetPrompts?.[pattern.id] ?? PRESET_PROMPTS[pattern.id]}
                 presetGroups={buildPresetGroups(pattern.id, agentLoadServers, themeOverrides)}
                 userToken={userToken ?? undefined}
                 preserveSessionOnNavigation={pattern.id === "p2"}
+                onRunStateChange={(cancel) => { activeAbortRef.current = cancel; }}
                 authStatus={
                   <>
                     {userToken ? (
@@ -702,6 +755,7 @@ export function PatternInteraction({ pattern, active, userToken, themeOverrides 
                           )}
                           <a
                             href={`/api/auth/logout/${pattern.id}`}
+                            onClick={() => activeAbortRef.current?.()}
                             className="flex items-center gap-1 text-xs text-slate-500 hover:text-slate-300"
                           >
                             <LogOut size={11} />
@@ -742,6 +796,7 @@ export function PatternInteraction({ pattern, active, userToken, themeOverrides 
                   </span>
                   <a
                     href={`/api/auth/logout/${pattern.id}`}
+                    onClick={() => activeAbortRef.current?.()}
                     className="flex items-center gap-1 text-xs text-slate-500 hover:text-slate-300"
                   >
                     <LogOut size={11} />
@@ -752,12 +807,14 @@ export function PatternInteraction({ pattern, active, userToken, themeOverrides 
               <MissionPanel
                 agentUrl={pattern.agentUrl ?? ""}
                 patternId={pattern.id}
+                viewerSessionId={viewerSessionId}
                 disabled={!active}
                 disabledReason={`docker compose --profile ${pattern.id} up`}
                 missions={MISSIONS[pattern.id] ?? []}
                 userToken={userToken ?? undefined}
                 selectedMissionId={selectedMissionId}
                 onMissionSelect={setSelectedMissionId}
+                onRunStateChange={(cancel) => { activeAbortRef.current = cancel; }}
                 resourcesSlot={
                   selectedMissionId && (pattern.mcpServers?.length || agentLoadServers.length > 0) ? (
                     <McpServerStatus
@@ -779,7 +836,7 @@ export function PatternInteraction({ pattern, active, userToken, themeOverrides 
             </div>
           )}
           {pattern.rightPanel === "pkce-chat" && (
-            <PkceChatPanel pattern={pattern} active={active} />
+            <PkceChatPanel pattern={pattern} active={active} viewerSessionId={viewerSessionId} />
           )}
           {pattern.rightPanel === "delegation" && pattern.requiresUserToken && !userToken && (
             <UserLoginGate pattern={pattern} active={active} />
@@ -787,17 +844,19 @@ export function PatternInteraction({ pattern, active, userToken, themeOverrides 
           {pattern.rightPanel === "delegation" && (!pattern.requiresUserToken || userToken) && (
             <div className="flex min-h-0 flex-1 flex-col gap-2">
               <div className="shrink-0">
-                <DelegationPanel userToken={userToken ?? null} compact />
+                <DelegationPanel userToken={userToken ?? null} compact viewerSessionId={viewerSessionId} />
               </div>
               <div className="flex min-h-0 flex-1 flex-col">
                 <ChatPanel
                   key={userToken ?? "anonymous"}
                   agentUrl={pattern.agentUrl ?? ""}
                   patternId={pattern.id}
+                  viewerSessionId={viewerSessionId}
                   disabled={!active}
                   disabledReason={`Start this pattern: docker compose --profile ${pattern.id} up`}
                   presetPrompts={PRESET_PROMPTS[pattern.id]}
                   userToken={userToken ?? undefined}
+                  onRunStateChange={(cancel) => { activeAbortRef.current = cancel; }}
                   authStatus={
                     userToken ? (
                       <div className="flex items-center justify-between px-3 py-1.5 border-b border-gray-700/40 bg-gray-900/40">
@@ -805,7 +864,11 @@ export function PatternInteraction({ pattern, active, userToken, themeOverrides 
                           <Shield size={11} className="text-violet-400" />
                           <span className="text-xs text-slate-400">Logged in · XAA + FGA active</span>
                         </div>
-                        <a href="/api/auth/logout/p7" className="text-[10px] text-slate-500 hover:text-slate-300 transition-colors">
+                        <a
+                          href="/api/auth/logout/p7"
+                          onClick={() => activeAbortRef.current?.()}
+                          className="text-[10px] text-slate-500 hover:text-slate-300 transition-colors"
+                        >
                           Log out
                         </a>
                       </div>
@@ -867,7 +930,14 @@ export function PatternInteraction({ pattern, active, userToken, themeOverrides 
             />
           )}
           <div className="min-h-0 flex-1">
-            <EventStream events={events} onClear={() => setEvents([])} />
+            <EventStream
+              events={events}
+              onClear={async () => {
+                activeAbortRef.current?.();
+                setEvents([]);
+                await fetch(`/api/events/${pattern.id}?sessionId=${encodeURIComponent(viewerSessionId)}`, { method: "DELETE" });
+              }}
+            />
           </div>
         </div>
         )}

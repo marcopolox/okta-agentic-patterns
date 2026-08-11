@@ -44,7 +44,11 @@ function isLongDetail(detail: string): boolean {
   return detail.includes("\n") || detail.length > 120;
 }
 
-function EventRow({ ev }: { ev: DemoEvent }) {
+function EventRow({ ev, isCorrelated, onHoverCallId }: {
+  ev: DemoEvent;
+  isCorrelated: boolean;
+  onHoverCallId: (callId: string | null) => void;
+}) {
   const [expanded, setExpanded] = useState(false);
   const hasLongDetail = ev.detail ? isLongDetail(ev.detail) : false;
   const borderColor = getActorBorderColor(ev.actor);
@@ -54,7 +58,11 @@ function EventRow({ ev }: { ev: DemoEvent }) {
     : ev.detail;
 
   return (
-    <div className={`flex flex-col gap-0.5 rounded-r pl-2 py-0.5 ${borderColor}`}>
+    <div
+      className={`flex flex-col gap-0.5 rounded-r pl-2 py-0.5 transition-colors ${borderColor} ${isCorrelated ? "bg-cyan-500/10" : ""}`}
+      onMouseEnter={() => ev.callId && onHoverCallId(ev.callId)}
+      onMouseLeave={() => ev.callId && onHoverCallId(null)}
+    >
       <div className="flex items-center gap-2">
         {levelIcons[ev.level]}
         <span className={`font-medium ${levelStyles[ev.level]}`}>
@@ -102,6 +110,7 @@ function EventRow({ ev }: { ev: DemoEvent }) {
 
 export function EventStream({ events, onClear }: EventStreamProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
+  const [hoveredCallId, setHoveredCallId] = useState<string | null>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -142,7 +151,12 @@ export function EventStream({ events, onClear }: EventStreamProps) {
                 <div className="h-px flex-1 bg-gray-700/60" />
               </div>
             ) : (
-              <EventRow key={ev.id} ev={ev} />
+              <EventRow
+                key={ev.id}
+                ev={ev}
+                isCorrelated={!!hoveredCallId && ev.callId === hoveredCallId}
+                onHoverCallId={setHoveredCallId}
+              />
             ))}
           </div>
         )}

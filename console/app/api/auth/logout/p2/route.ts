@@ -5,6 +5,9 @@ export async function GET(req: NextRequest) {
   const accessToken = req.cookies.get("p2_access_token")?.value;
   const domain = process.env.OKTA_DOMAIN;
 
+  const eventBusUrl = process.env.EVENT_BUS_URL ?? "http://event-bus:4000";
+  await fetch(`${eventBusUrl}/events/p2`, { method: "DELETE" }).catch(() => {});
+
   const postLogoutUri = new URL("/patterns/p2", base).toString();
 
   let redirectTarget: string;

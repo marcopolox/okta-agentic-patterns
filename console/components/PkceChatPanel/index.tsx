@@ -5,7 +5,7 @@ import { LogIn } from "lucide-react";
 import { Pattern } from "@/lib/patterns";
 import { ChatPanel } from "@/components/ChatPanel";
 
-export function PkceChatPanel({ pattern, active }: { pattern: Pattern; active: boolean }) {
+export function PkceChatPanel({ pattern, active, viewerSessionId }: { pattern: Pattern; active: boolean; viewerSessionId?: string }) {
   const [token, setToken] = useState<string | null>(null);
 
   useEffect(() => {
@@ -70,6 +70,7 @@ export function PkceChatPanel({ pattern, active }: { pattern: Pattern; active: b
     <ChatPanel
       agentUrl={pattern.agentUrl ?? ""}
       patternId={pattern.id}
+      viewerSessionId={viewerSessionId}
       disabled={false}
     />
   );

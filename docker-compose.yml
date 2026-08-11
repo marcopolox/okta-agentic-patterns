@@ -51,7 +51,7 @@ services:
       P3_AGENT_INTERNAL_URL: http://p3-agent:3300
       P6_AGENT_INTERNAL_URL: http://p6-agent:3600
       P1_AGENT_INTERNAL_URL: http://hr-server:3101
-      MCP_ADAPTER_URL: ${MCP_ADAPTER_URL:-http://localhost:8000}
+      MCP_ADAPTER_URL: ${MCP_ADAPTER_URL:-}
       NEXT_PUBLIC_P6_AGENT_URL: http://localhost:${P6_PORT:-3600}
       EVENT_BUS_URL: http://event-bus:4000
       P6_ORCH_A2A_AUTHZ_SERVER_ID: ${P6_ORCH_A2A_AUTHZ_SERVER_ID:-}
@@ -130,10 +130,12 @@ services:
     environment:
       PORT: 3200
       EVENT_BUS_URL: http://event-bus:4000
-      # Standalone MCP adapter — internal URL for API calls from Docker
-      MCP_ADAPTER_URL: http://host.docker.internal:${MCP_ADAPTER_INTERNAL_PORT:-8008}
+      # Standalone MCP adapter — set MCP_ADAPTER_URL in .env to your deployed bridge URL
+      MCP_ADAPTER_URL: ${MCP_ADAPTER_URL:-}
       # Browser-accessible adapter URL for auth redirects embedded in auth links
-      MCP_ADAPTER_PUBLIC_URL: ${MCP_ADAPTER_URL:-http://localhost:8008}
+      MCP_ADAPTER_PUBLIC_URL: ${MCP_ADAPTER_URL:-}
+      # Direct inventory server URL — used for unauthenticated tool discovery (adapter requires auth)
+      INVENTORY_MCP_URL: http://inventory-server:3103
       # Console base URL — used to build the redirect_uri in the auth flow
       CONSOLE_URL: ${NEXTAUTH_URL:-http://localhost:3020}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
@@ -141,6 +143,7 @@ services:
       NODE_TLS_REJECT_UNAUTHORIZED: "0"
     depends_on:
       - event-bus
+      - inventory-server
     logging: *default-logging
 
   # ── Pattern 3: 1st Party XAA Native ─────────────────────────────────────────

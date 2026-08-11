@@ -28,6 +28,7 @@ export interface Pattern {
   hasAgentStatus?: boolean; // when true, PatternInteraction polls GET /status before showing chat (agent loads config at startup)
   buildStatus: "done" | "pending" | "blocked"; // drives landing page card border color
   note?: string; // optional note shown on the landing page card (e.g. requirements)
+  disabled?: boolean; // when true, grayed out on the landing page and the detail route is blocked
   mcpServers?: McpServerDef[]; // MCP resource servers used by this pattern
   platforms?: PlatformLink[]; // P8: per-platform video (detail page) + architecture diagram (landing card) links
 }
@@ -126,6 +127,7 @@ export const PATTERNS: Pattern[] = [
     requiresUserToken: true,
     buildStatus: "done",
     hasAgentStatus: true,
+    disabled: true,
   },
   {
     id: "p5",
@@ -143,6 +145,7 @@ export const PATTERNS: Pattern[] = [
     requiresUserToken: true,
     buildStatus: "pending",
     note: "Requires companion Android mobile app",
+    disabled: true,
     mcpServers: [
       {
         name: "Inventory MCP",
@@ -225,12 +228,21 @@ export const PATTERNS: Pattern[] = [
       {
         label: "AWS Bedrock Agents",
         videoUrls: [
-          { label: "AWS Bedrock Agents", url: "https://0lqdrzz0a2tp5gv9.public.blob.vercel-storage.com/videos/salesforce-agentforce" },
           { label: "AWS Agentcore", url: "https://0lqdrzz0a2tp5gv9.public.blob.vercel-storage.com/videos/aws-agentcore" },
         ],
       },
-      { label: "Salesforce Agentforce" },
-      { label: "Microsoft Copilot Studio" },
+      {
+        label: "Salesforce Agentforce",
+        videoUrls: [
+          { label: "Salesforce Agentforce", url: "https://0lqdrzz0a2tp5gv9.public.blob.vercel-storage.com/videos/salesforce-agentforce" },
+        ],
+      },
+      {
+        label: "Microsoft Copilot Studio",
+        videoUrls: [
+          { label: "Microsoft Copilot Studio", url: "https://drive.google.com/file/d/1-cIzk6_0UFTw4UMJzQ96Qjx0-ZSHgA5S" },
+        ],
+      },
       {
         label: "Google Vertex AI",
         videoUrls: [

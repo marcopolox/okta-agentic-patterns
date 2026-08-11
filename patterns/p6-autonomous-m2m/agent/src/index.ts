@@ -2,6 +2,7 @@ import express from "express";
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { SignJWT, importJWK, importPKCS8, createRemoteJWKSet, jwtVerify } from "jose";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 // ── P6 Orchestrator — Agent-to-Agent (A2A) delegation ──────────────────────────
 // A user authenticates through the console (app) and kicks off the orchestrator,
@@ -168,12 +169,19 @@ async function loadA2AConnections(): Promise<void> {
   console.log(`[Okta] Loaded ${discoveredWorkers.length} active A2A worker(s): ${discoveredWorkers.map((w) => w.label).join(", ") || "(none)"}`);
 }
 
+// Scopes emitted events to the viewer session that triggered the request currently
+// in flight, so concurrent browsers watching this pattern don't see each other's events.
+const sessionCtx = new AsyncLocalStorage<{ sessionId?: string }>();
+
 async function emitEvent(actor: string, action: string, target: string, detail?: string, tokenSnippet?: string, level = "auth", token?: string) {
   try {
     await fetch(`${EVENT_BUS_URL}/emit`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ patternId: PATTERN_ID, actor, action, target, detail, tokenSnippet, level, token }),
+      body: JSON.stringify({
+        patternId: PATTERN_ID, actor, action, target, detail, tokenSnippet, level, token,
+        sessionId: sessionCtx.getStore()?.sessionId,
+      }),
     });
   } catch {
     // Non-fatal
@@ -285,15 +293,19 @@ async function getA2AToken(idJag: string, worker: WorkerCfg): Promise<string> {
   return access_token;
 }
 
-async function invokeWorker(worker: WorkerCfg, subjectToken: string, task: string, tx = TX): Promise<string> {
+async function invokeWorker(worker: WorkerCfg, subjectToken: string, task: string, tx = TX, overrides?: LLMOverrides): Promise<string> {
   const idJag = await getA2AIdJag(subjectToken, worker, tx);
   const a2aToken = await getA2AToken(idJag, worker);
   await emitEvent("P6 Orchestrator", "invoking worker", `${worker.label} Worker`, `task=${task.slice(0, 80)}`, undefined, "info");
 
+  const llmHeaders: Record<string, string> = {};
+  if (overrides?.anthropicKey) { llmHeaders["X-LLM-Api-Key"] = overrides.anthropicKey; llmHeaders["X-LLM-Provider"] = "anthropic"; }
+  else if (overrides?.openaiKey) { llmHeaders["X-LLM-Api-Key"] = overrides.openaiKey; llmHeaders["X-LLM-Provider"] = "openai"; }
+
   const resp = await fetch(`${worker.workerUrl}/invoke`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${a2aToken}` },
-    body: JSON.stringify({ task }),
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${a2aToken}`, ...llmHeaders },
+    body: JSON.stringify({ task, sessionId: sessionCtx.getStore()?.sessionId }),
   });
   const data = await resp.json().catch(() => ({})) as { ok?: boolean; summary?: string; error?: string };
   if (!resp.ok || !data.ok) {
@@ -366,7 +378,7 @@ interface Message { role: "user" | "assistant"; content: string; }
 type ToolExecutor = (name: string, args: Record<string, unknown>) => Promise<string>;
 interface LLMOverrides { anthropicKey?: string; openaiKey?: string; }
 
-async function* runAgentLoop(userMessage: string, history: Message[], callTool: ToolExecutor, tools: ToolDef[], workerLabels: string[], overrides?: LLMOverrides): AsyncGenerator<string> {
+async function* runAgentLoop(userMessage: string, history: Message[], callTool: ToolExecutor, tools: ToolDef[], workerLabels: string[], overrides?: LLMOverrides, signal?: AbortSignal): AsyncGenerator<string> {
   const messages: Message[] = [...history, { role: "user", content: userMessage }];
   const workerList = workerLabels.length ? workerLabels.join(" and ") : "(none configured)";
   const system = `You are a fully autonomous orchestrator AI agent (P6). You were triggered without direct human interaction (cron/app/user). ` +
@@ -375,19 +387,20 @@ async function* runAgentLoop(userMessage: string, history: Message[], callTool: 
     `Your job: 1) delegate the right sub-tasks to the worker agents using their invoke_*_worker tools, 2) combine their results into one clear report, 3) post the report to Slack with post_slack_message. ` +
     `Use Slack markdown (*bold*, \`code\`, bullet lists). Always complete the full workflow including the Slack post.`;
   if (overrides?.anthropicKey || process.env.ANTHROPIC_API_KEY) {
-    yield* runAnthropic(messages, system, callTool, tools, overrides);
+    yield* runAnthropic(messages, system, callTool, tools, overrides, signal);
   } else if (overrides?.openaiKey || process.env.OPENAI_API_KEY) {
-    yield* runOpenAI(messages, system, callTool, tools, overrides);
+    yield* runOpenAI(messages, system, callTool, tools, overrides, signal);
   } else {
     yield "No LLM API key configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY.";
   }
 }
 
-async function* runAnthropic(messages: Message[], system: string, callTool: ToolExecutor, tools: ToolDef[], overrides?: LLMOverrides): AsyncGenerator<string> {
+async function* runAnthropic(messages: Message[], system: string, callTool: ToolExecutor, tools: ToolDef[], overrides?: LLMOverrides, signal?: AbortSignal): AsyncGenerator<string> {
   const anthropic = new Anthropic({ ...(overrides?.anthropicKey && { apiKey: overrides.anthropicKey }) });
   const anthropicTools: Anthropic.Tool[] = tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.inputSchema as Anthropic.Tool["input_schema"] }));
   let msgs: Anthropic.MessageParam[] = messages.map((m) => ({ role: m.role, content: m.content }));
   while (true) {
+    if (signal?.aborted) return;
     const response = await anthropic.messages.create({
       model: process.env.ANTHROPIC_MODEL ?? "claude-opus-4-7",
       max_tokens: 4096, system, messages: msgs, tools: anthropicTools,
@@ -398,6 +411,10 @@ async function* runAnthropic(messages: Message[], system: string, callTool: Tool
     if (response.stop_reason !== "tool_use" || toolBlocks.length === 0) break;
     const toolResults: Anthropic.ToolResultBlockParam[] = [];
     for (const tool of toolBlocks) {
+      if (tool.name === "post_slack_message") {
+        const reportText = (tool.input as { text?: string }).text;
+        if (reportText) yield `\n\n${reportText}\n\n`;
+      }
       const result = await callTool(tool.name, tool.input as Record<string, unknown>);
       toolResults.push({ type: "tool_result", tool_use_id: tool.id, content: result });
     }
@@ -405,11 +422,12 @@ async function* runAnthropic(messages: Message[], system: string, callTool: Tool
   }
 }
 
-async function* runOpenAI(messages: Message[], system: string, callTool: ToolExecutor, tools: ToolDef[], overrides?: LLMOverrides): AsyncGenerator<string> {
+async function* runOpenAI(messages: Message[], system: string, callTool: ToolExecutor, tools: ToolDef[], overrides?: LLMOverrides, signal?: AbortSignal): AsyncGenerator<string> {
   const openai = new OpenAI({ ...(overrides?.openaiKey && { apiKey: overrides.openaiKey }) });
   const openaiTools: OpenAI.ChatCompletionTool[] = tools.map((t) => ({ type: "function" as const, function: { name: t.name, description: t.description, parameters: t.inputSchema } }));
   let msgs: OpenAI.ChatCompletionMessageParam[] = [{ role: "system", content: system }, ...messages.map((m) => ({ role: m.role, content: m.content }))];
   while (true) {
+    if (signal?.aborted) return;
     const response = await openai.chat.completions.create({ model: process.env.OPENAI_MODEL ?? "gpt-4o", messages: msgs, tools: openaiTools });
     const choice = response.choices[0];
     if (choice.message.content) yield choice.message.content;
@@ -417,6 +435,9 @@ async function* runOpenAI(messages: Message[], system: string, callTool: ToolExe
     const toolResults: OpenAI.ChatCompletionToolMessageParam[] = [];
     for (const tc of choice.message.tool_calls) {
       const args = JSON.parse(tc.function.arguments) as Record<string, unknown>;
+      if (tc.function.name === "post_slack_message" && typeof args.text === "string") {
+        yield `\n\n${args.text}\n\n`;
+      }
       const result = await callTool(tc.function.name, args);
       toolResults.push({ role: "tool", tool_call_id: tc.id, content: result });
     }
@@ -425,7 +446,7 @@ async function* runOpenAI(messages: Message[], system: string, callTool: ToolExe
 }
 
 // ── The A2A run — user-delegated (the user's token is the subject) ─────────────
-async function* runOrchestration(message: string, history: Message[], userToken: string, overrides?: LLMOverrides, slackToken?: string, slackChannel?: string, tx = TX): AsyncGenerator<string> {
+async function* runOrchestration(message: string, history: Message[], userToken: string, overrides?: LLMOverrides, slackToken?: string, slackChannel?: string, tx = TX, signal?: AbortSignal): AsyncGenerator<string> {
   if (discoveredWorkers.length === 0) {
     yield "No A2A worker agents are configured/active. Provision the worker A2A servers, connections, and delegation links in Okta, then set the P6_*_WORKER_* env vars.";
     return;
@@ -435,13 +456,14 @@ async function* runOrchestration(message: string, history: Message[], userToken:
   const tools = buildTools(discoveredWorkers);
 
   const callTool: ToolExecutor = async (name, args) => {
+    if (signal?.aborted) return "cancelled";
     if (name === "post_slack_message") return postSlackMessage(args.text as string, (args.channel as string | undefined) ?? slackChannel, slackToken);
     const worker = workers.get(name);
     if (!worker) return `Unknown tool: ${name}`;
-    return invokeWorker(worker, userToken, String(args.task ?? ""), tx);
+    return invokeWorker(worker, userToken, String(args.task ?? ""), tx, overrides);
   };
 
-  yield* runAgentLoop(message, history, callTool, tools, discoveredWorkers.map((w) => w.label), overrides);
+  yield* runAgentLoop(message, history, callTool, tools, discoveredWorkers.map((w) => w.label), overrides, signal);
 }
 
 // ── Express server ───────────────────────────────────────────────────────────
@@ -481,8 +503,9 @@ const sessions = new Map<string, Message[]>();
 const seenTokenSessions = new Set<string>();
 
 app.post("/chat", async (req, res) => {
-  const { message, session_id } = req.body as { message: string; session_id?: string };
+  const { message, session_id, viewer_session_id } = req.body as { message: string; session_id?: string; viewer_session_id?: string };
   if (!message) { res.status(400).json({ error: "message required" }); return; }
+  sessionCtx.enterWith({ sessionId: viewer_session_id });
 
   const llmOverrides: LLMOverrides = {
     anthropicKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] !== "openai"
@@ -515,9 +538,16 @@ app.post("/chat", async (req, res) => {
   res.setHeader("Content-Type", "text/plain; charset=utf-8");
   res.setHeader("Transfer-Encoding", "chunked");
 
+  const controller = new AbortController();
+  // req 'close' fires as soon as the request body is read, not when the response
+  // finishes — aborting on it kills the LLM call almost immediately on every
+  // request. res 'close' fires when the connection actually ends; writableEnded
+  // distinguishes a normal finish from a real client disconnect.
+  res.on("close", () => { if (!res.writableEnded) controller.abort(); });
+
   try {
     let fullResponse = "";
-    for await (const chunk of runOrchestration(message, history, userToken, llmOverrides, slackToken, slackChannel)) {
+    for await (const chunk of runOrchestration(message, history, userToken, llmOverrides, slackToken, slackChannel, TX, controller.signal)) {
       fullResponse += chunk;
       res.write(chunk);
     }
@@ -535,8 +565,9 @@ app.post("/chat", async (req, res) => {
 const invokeSessions = new Map<string, Message[]>();
 
 app.post("/invoke", async (req, res) => {
-  const { message, session_id } = req.body as { message: string; session_id?: string };
+  const { message, session_id, viewer_session_id } = req.body as { message: string; session_id?: string; viewer_session_id?: string };
   if (!message) { res.status(400).json({ error: "message required" }); return; }
+  sessionCtx.enterWith({ sessionId: viewer_session_id });
   let claims: InboundCCClaims;
   try {
     claims = await validateInboundCCToken(req.headers.authorization);
@@ -552,9 +583,21 @@ app.post("/invoke", async (req, res) => {
   res.setHeader("Content-Type", "text/plain; charset=utf-8");
   res.setHeader("Transfer-Encoding", "chunked");
   const ccToken = req.headers.authorization!.slice(7);
+  const llmOverrides: LLMOverrides = {
+    anthropicKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] !== "openai"
+      ? String(req.headers["x-llm-api-key"]) : undefined,
+    openaiKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] === "openai"
+      ? String(req.headers["x-llm-api-key"]) : undefined,
+  };
+  const controller = new AbortController();
+  // req 'close' fires as soon as the request body is read, not when the response
+  // finishes — aborting on it kills the LLM call almost immediately on every
+  // request. res 'close' fires when the connection actually ends; writableEnded
+  // distinguishes a normal finish from a real client disconnect.
+  res.on("close", () => { if (!res.writableEnded) controller.abort(); });
   try {
     let fullResponse = "";
-    for await (const chunk of runOrchestration(message, history, ccToken, undefined, undefined, undefined, TX_CC)) {
+    for await (const chunk of runOrchestration(message, history, ccToken, llmOverrides, undefined, undefined, TX_CC, controller.signal)) {
       fullResponse += chunk;
       res.write(chunk);
     }

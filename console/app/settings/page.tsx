@@ -222,6 +222,7 @@ export default function SettingsPage() {
           <h2 className="mb-1 text-base font-semibold text-white">Industry Customization</h2>
           <p className="mb-4 text-sm text-slate-400">
             Switch the console to a different industry vertical. Changes the color scheme and mock data returned by the MCP servers.
+            <span className="ml-1 text-amber-400/70 italic">Disabled in this environment.</span>
           </p>
           <IndustrySwitcher currentIndustryId={industryId} />
         </section>

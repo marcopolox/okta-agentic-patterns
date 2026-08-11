@@ -8,16 +8,18 @@ export interface DemoEvent {
   detail?: string;
   tokenSnippet?: string;
   token?: string;
+  callId?: string;
   level: "info" | "auth" | "token" | "error" | "separator";
 }
 
 export function subscribeToEvents(
   patternId: string,
+  sessionId: string,
   onEvent: (event: DemoEvent) => void,
   onClear?: () => void,
   onError?: (err: Event) => void
 ): () => void {
-  const url = `/api/events/${patternId}`;
+  const url = `/api/events/${patternId}?sessionId=${encodeURIComponent(sessionId)}`;
   const es = new EventSource(url);
 
   es.onmessage = (e) => {

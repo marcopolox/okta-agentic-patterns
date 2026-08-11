@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { z } from "zod";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { HR_THEMES } from "./industries/index.js";
 
 const PORT = parseInt(process.env.PORT ?? "3101");
@@ -21,14 +22,23 @@ function getData() {
 const JWKS = createRemoteJWKSet(new URL(`${OKTA_ISSUER}/v1/keys`));
 const recentlyValidated = new Set<string>();
 
+// Scopes emitted events to the viewer session behind the request currently in flight
+// (set from the X-Session-Id header the calling agent forwards), so concurrent
+// browsers watching the same pattern don't see each other's tool-call events.
+// callId scopes events further, to the single tool call that produced them, so
+// concurrent tool calls within the same session can be told apart in the UI.
+const sessionCtx = new AsyncLocalStorage<{ sessionId?: string; callId?: string }>();
+
 async function emitEvent(actor: string, action: string, target: string, detail?: string, tokenSnippet?: string, level = "auth", scopePatternIds?: string[]) {
   const targets = scopePatternIds ?? PATTERN_IDS;
+  const sessionId = sessionCtx.getStore()?.sessionId;
+  const callId = sessionCtx.getStore()?.callId;
   try {
     await Promise.all(targets.map((patternId) =>
       fetch(`${EVENT_BUS_URL}/emit`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ patternId, actor, action, target, detail, tokenSnippet, level }),
+        body: JSON.stringify({ patternId, actor, action, target, detail, tokenSnippet, level, sessionId, callId }),
       })
     ));
   } catch {
@@ -95,7 +105,7 @@ function createMcpServer(patternIds: string[]) {
 
   server.tool("get_headcount", "Get total employee count by department. No authentication required.", {},
     async () => {
-      await emitEvent("HR Server", "called tool", "get_headcount", "unauthenticated", undefined, "info", patternIds);
+      await emitEvent("HR Server", "called tool", "get_headcount", "public tool — no auth required", undefined, "info", patternIds);
       const counts = getData().departments.map((d) => ({ department: d.name, headCount: d.headcount }));
       return { content: [{ type: "text", text: JSON.stringify(counts, null, 2) }] };
     }
@@ -276,6 +286,9 @@ app.get("/.well-known/oauth-authorization-server", (req, res) => {
 app.all("/mcp", async (req, res) => {
   const xPatternId = typeof req.headers["x-pattern-id"] === "string" ? req.headers["x-pattern-id"] : null;
   const emitPatterns = xPatternId && PATTERN_IDS.includes(xPatternId) ? [xPatternId] : undefined;
+  const xSessionId = typeof req.headers["x-session-id"] === "string" ? req.headers["x-session-id"] : undefined;
+  const xCallId = typeof req.headers["x-call-id"] === "string" ? req.headers["x-call-id"] : undefined;
+  sessionCtx.enterWith({ sessionId: xSessionId, callId: xCallId });
 
   const isPublicTool = req.body?.method === "tools/call" && PUBLIC_TOOLS.has(req.body?.params?.name);
   if (!isPublicTool) {

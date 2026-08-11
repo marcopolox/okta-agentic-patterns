@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { cookies } from "next/headers";
 import TopBar from "@/components/TopBar";
+import ApiKeyGate from "@/components/ApiKeyGate";
 import { DEFAULT_INDUSTRY_ID } from "@/lib/industries";
 import { DEFAULT_UI_THEME_ID } from "@/lib/ui-themes";
 import { ThemeTransitionOverlay } from "@/components/ThemeTransitionOverlay";
@@ -40,9 +41,11 @@ export default async function RootLayout({
       data-ui-theme={uiThemeId}
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col text-white">
+      <body className="h-dvh flex flex-col overflow-hidden text-white">
         <TopBar />
-        {children}
+        <div className="flex-1 min-h-0 overflow-y-auto">
+          <ApiKeyGate>{children}</ApiKeyGate>
+        </div>
         <ThemeTransitionOverlay />
       </body>
     </html>

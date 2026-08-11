@@ -67,6 +67,22 @@ export const INDUSTRIES: DemoIndustry[] = [
             "Show the org chart and the Finance budget for the Engineering team",
           ],
         },
+        {
+          label: "GitHub",
+          prompts: [
+            "List my GitHub repositories",
+            "Search GitHub repos owned by the Engineering team",
+            "Show details for a specific repo",
+          ],
+        },
+        {
+          label: "Slack",
+          prompts: [
+            "Post a message to Slack",
+            "Post the Engineering team roster and their roles to Slack",
+            "Share the department budget overview on Slack",
+          ],
+        },
       ],
       p4: [
         {
@@ -122,6 +138,22 @@ export const INDUSTRIES: DemoIndustry[] = [
             "What's the total budget for the Emergency department?",
             "Update Dr. Sarah Chen's title to Chief of Cardiology",
             "Show the clinical org chart and departmental spend",
+          ],
+        },
+        {
+          label: "GitHub",
+          prompts: [
+            "List my repositories",
+            "Search repos related to FHIR or patient data",
+            "Show the patient-portal repository",
+          ],
+        },
+        {
+          label: "Slack",
+          prompts: [
+            "Post a message to Slack",
+            "Post the clinical staff roster to #clinical-ops",
+            "Share the Emergency department budget on Slack",
           ],
         },
       ],
@@ -181,6 +213,22 @@ export const INDUSTRIES: DemoIndustry[] = [
             "Show the org chart and the marketing budget",
           ],
         },
+        {
+          label: "GitHub",
+          prompts: [
+            "List my repositories",
+            "Search repos related to e-commerce or Shopify",
+            "Show the storefront repository",
+          ],
+        },
+        {
+          label: "Slack",
+          prompts: [
+            "Post a message to Slack",
+            "Post the store associates list to #store-ops",
+            "Share the payroll budget overview on Slack",
+          ],
+        },
       ],
       p4: [
         {
@@ -236,6 +284,22 @@ export const INDUSTRIES: DemoIndustry[] = [
             "What's the total budget for Quality Control?",
             "Promote James Martinez to Senior Process Engineer",
             "Show the plant org chart and the R&D budget",
+          ],
+        },
+        {
+          label: "GitHub",
+          prompts: [
+            "List my repositories",
+            "Search repos related to SCADA or industrial automation",
+            "Show the MES integration repository",
+          ],
+        },
+        {
+          label: "Slack",
+          prompts: [
+            "Post a message to Slack",
+            "Post the engineering team roster to #production-floor",
+            "Share the R&D budget on Slack",
           ],
         },
       ],
@@ -295,6 +359,22 @@ export const INDUSTRIES: DemoIndustry[] = [
             "Show the agency org chart and District 1 budget",
           ],
         },
+        {
+          label: "GitHub",
+          prompts: [
+            "List my repositories",
+            "Search repos related to FedRAMP or compliance",
+            "Show the citizen-portal repository",
+          ],
+        },
+        {
+          label: "Slack",
+          prompts: [
+            "Post a message to Slack",
+            "Post the policy analyst roster to #it-operations",
+            "Share the IT infrastructure budget on Slack",
+          ],
+        },
       ],
       p4: [
         {
@@ -350,6 +430,22 @@ export const INDUSTRIES: DemoIndustry[] = [
             "What's the total research grants budget?",
             "Update Dr. Patel's title to Full Professor",
             "Show the academic org chart and Graduate Programs budget",
+          ],
+        },
+        {
+          label: "GitHub",
+          prompts: [
+            "List my repositories",
+            "Search repos related to LMS or Canvas",
+            "Show the student-portal repository",
+          ],
+        },
+        {
+          label: "Slack",
+          prompts: [
+            "Post a message to Slack",
+            "Post the STEM faculty list to #faculty-announcements",
+            "Share the research grants budget on Slack",
           ],
         },
       ],

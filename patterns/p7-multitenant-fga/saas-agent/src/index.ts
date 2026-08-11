@@ -5,6 +5,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { SignJWT, importJWK, importPKCS8 } from "jose";
 import { OpenFgaClient, CredentialsMethod } from "@openfga/sdk";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { randomUUID } from "node:crypto";
 
 const PORT = parseInt(process.env.PORT ?? "3700");
 const EVENT_BUS_URL = process.env.EVENT_BUS_URL ?? "http://localhost:4000";
@@ -86,10 +88,20 @@ const fgaClient = new OpenFgaClient({
   },
 });
 
-async function checkFgaDelegation(userEmail: string, toolName: string): Promise<boolean> {
+// This is a shared demo login, so every visitor authenticates as the same Okta
+// user — without this, concurrent demo sessions would read/write the exact same
+// FGA tuples and overwrite each other's delegated-tool grants. Folding the
+// per-page-mount viewerSessionId into the FGA user id (mirrors console's
+// app/api/p7/delegations/route.ts) gives each browser session its own isolated
+// set of tuples while keeping the same real identity.
+function fgaUserId(email: string, viewerSessionId?: string): string {
+  return viewerSessionId ? `${email}::${viewerSessionId}` : email;
+}
+
+async function checkFgaDelegation(fgaUser: string, toolName: string): Promise<boolean> {
   try {
     const response = await fgaClient.check({
-      user: `user:${userEmail}`,
+      user: `user:${fgaUser}`,
       relation: "delegated",
       object: `tool:${toolName}`,
     });
@@ -114,19 +126,27 @@ function getScopesForTool(toolName: string, availableScopes: string[]): string[]
 
 // ── Event bus ───────────────────────────────────────────────────────────────
 
+// Scopes emitted events to the viewer session that triggered the request currently
+// in flight, so concurrent browsers watching this pattern don't see each other's events.
+const sessionCtx = new AsyncLocalStorage<{ sessionId?: string }>();
+
 async function emitEvent(
   actor: string,
   action: string,
   target: string,
   detail?: string,
   token?: string,
-  level: "info" | "auth" | "token" | "error" | "separator" = "info"
+  level: "info" | "auth" | "token" | "error" | "separator" = "info",
+  callId?: string
 ): Promise<void> {
   try {
     await fetch(`${EVENT_BUS_URL}/emit`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ patternId: PATTERN_ID, actor, action, target, detail, token, level }),
+      body: JSON.stringify({
+        patternId: PATTERN_ID, actor, action, target, detail, token, level, callId,
+        sessionId: sessionCtx.getStore()?.sessionId,
+      }),
     });
   } catch { /* ignore */ }
 }
@@ -248,6 +268,7 @@ async function getStep2Token(
 interface RequestContext {
   userIdToken: string;
   userEmail: string;
+  viewerSessionId?: string;
   tokenCache: Map<string, string>;
 }
 
@@ -271,6 +292,9 @@ interface ToolDef {
   _server: DiscoveredServer;
 }
 
+// P7 always attaches a real tenant user's token to every tool call, so tools that require
+// no scopes (e.g. Finance's get_fiscal_summary, HR's get_headcount) are filtered out here —
+// calling them would be pointless given the user is already authenticated (same reasoning as P3).
 async function discoverAllTools(_ctx: RequestContext): Promise<{ tools: ToolDef[]; toolMap: Map<string, DiscoveredServer> }> {
   const tools: ToolDef[] = [];
   const toolMap = new Map<string, DiscoveredServer>();
@@ -281,13 +305,15 @@ async function discoverAllTools(_ctx: RequestContext): Promise<{ tools: ToolDef[
       // This avoids needing an XAA token during startup/discovery
       const resp = await fetch(`${server.url}/tools`);
       if (!resp.ok) throw new Error(`Tool discovery failed for ${server.label}: ${resp.status}`);
-      const { tools: discovered } = await resp.json() as { tools: Array<{ name: string; description: string; inputSchema?: Record<string, unknown> }> };
+      const { tools: discovered } = await resp.json() as { tools: Array<{ name: string; description: string; inputSchema?: Record<string, unknown>; requiredScopes?: string[] }> };
+      const scopedTools = discovered.filter((t) => (t.requiredScopes?.length ?? 0) > 0);
+      const skipped = discovered.length - scopedTools.length;
 
-      for (const t of discovered) {
+      for (const t of scopedTools) {
         tools.push({ name: t.name, description: t.description, inputSchema: t.inputSchema ?? { type: "object", properties: {} }, _server: server });
         toolMap.set(t.name, server);
       }
-      await emitEvent("P7 Agent", "tools/list", server.label, `${discovered.length} tools discovered`, undefined, "info");
+      await emitEvent("P7 Agent", "tools/list", server.label, `${scopedTools.length} tools discovered${skipped > 0 ? ` (${skipped} public tool(s) skipped)` : ""}`, undefined, "info");
     } catch (err) {
       console.error(`[P7] Failed to discover tools for ${server.label}:`, err);
     }
@@ -302,18 +328,19 @@ async function callMcpTool(
   toolMap: Map<string, DiscoveredServer>
 ): Promise<string> {
   // FGA check before any tool call
+  const fgaUser = fgaUserId(ctx.userEmail, ctx.viewerSessionId);
   await emitEvent(
     "P7 Agent", "FGA check",
     "Okta FGA",
-    `{ user: "user:${ctx.userEmail}", relation: "delegated", object: "tool:${name}" }`,
+    `{ user: "user:${fgaUser}", relation: "delegated", object: "tool:${name}" }`,
     undefined, "auth"
   );
-  const allowed = await checkFgaDelegation(ctx.userEmail, name);
+  const allowed = await checkFgaDelegation(fgaUser, name);
   if (!allowed) {
     await emitEvent(
       "Okta FGA", "check result → denied",
       "P7 Agent",
-      `{ allowed: false } — user:${ctx.userEmail} has not delegated tool:${name}`,
+      `{ allowed: false } — user:${fgaUser} has not delegated tool:${name}`,
       undefined, "auth"
     );
     return `You haven't delegated '${name}' to me. Toggle it on in the delegation panel to allow this action.`;
@@ -321,7 +348,7 @@ async function callMcpTool(
   await emitEvent(
     "Okta FGA", "check result → allowed",
     "P7 Agent",
-    `{ allowed: true } — user:${ctx.userEmail} → delegated → tool:${name}`,
+    `{ allowed: true } — user:${fgaUser} → delegated → tool:${name}`,
     undefined, "auth"
   );
 
@@ -329,6 +356,7 @@ async function callMcpTool(
   if (!server) throw new Error(`No server found for tool: ${name}`);
 
   const scopes = getScopesForTool(name, server.scopes);
+  const callId = randomUUID().slice(0, 8);
   let token: string;
   try {
     token = await getTokenForServer(server, scopes, ctx);
@@ -339,13 +367,19 @@ async function callMcpTool(
     return `Access to "${name}" was blocked by Okta policy. Error: ${msg}`;
   }
 
+  const viewerSessionId = sessionCtx.getStore()?.sessionId;
   const transport = new StreamableHTTPClientTransport(new URL(`${server.url}/mcp`), {
-    requestInit: { headers: { Authorization: `Bearer ${token}` } },
+    requestInit: { headers: {
+      Authorization: `Bearer ${token}`,
+      "X-Pattern-Id": PATTERN_ID,
+      ...(viewerSessionId ? { "X-Session-Id": viewerSessionId } : {}),
+      "X-Call-Id": callId,
+    } },
   });
   const client = new Client({ name: "p7-agent", version: "1.0.0" }, { capabilities: {} });
   await client.connect(transport);
 
-  await emitEvent("P7 Agent", `tools/call ${name}`, server.label, JSON.stringify(args).slice(0, 120), undefined, "info");
+  await emitEvent("P7 Agent", `tools/call ${name}`, server.label, JSON.stringify(args).slice(0, 120), undefined, "info", callId);
   const result = await client.callTool({ name, arguments: args });
   await client.close();
 
@@ -377,7 +411,8 @@ async function runAgentLoop(
   ctx: RequestContext,
   tools: ToolDef[],
   toolMap: Map<string, DiscoveredServer>,
-  onToken: (text: string) => void
+  onToken: (text: string) => void,
+  signal?: AbortSignal
 ): Promise<void> {
   const messages: Anthropic.MessageParam[] | OpenAI.ChatCompletionMessageParam[] = [
     { role: "user", content: userMessage },
@@ -392,6 +427,7 @@ async function runAgentLoop(
   if (anthropic) {
     let continueLoop = true;
     while (continueLoop) {
+      if (signal?.aborted) return;
       continueLoop = false;
       const stream = anthropic.messages.stream({
         model: "claude-opus-4-8",
@@ -424,6 +460,7 @@ async function runAgentLoop(
         const toolResults: Anthropic.ToolResultBlockParam[] = [];
         for (const block of finalMsg.content) {
           if (block.type !== "tool_use") continue;
+          if (signal?.aborted) { toolResults.push({ type: "tool_result", tool_use_id: block.id, content: "cancelled" }); continue; }
           const result = await callMcpTool(block.name, block.input as Record<string, unknown>, ctx, toolMap);
           toolResults.push({ type: "tool_result", tool_use_id: block.id, content: result });
         }
@@ -437,6 +474,7 @@ async function runAgentLoop(
     }));
     let continueLoop = true;
     while (continueLoop) {
+      if (signal?.aborted) return;
       continueLoop = false;
       const stream = await openai.chat.completions.create({
         model: "gpt-4o",
@@ -469,6 +507,7 @@ async function runAgentLoop(
         continueLoop = true;
         (messages as OpenAI.ChatCompletionMessageParam[]).push({ role: "assistant", content: assistantText || null, tool_calls: toolCalls });
         for (const tc of toolCalls) {
+          if (signal?.aborted) { (messages as OpenAI.ChatCompletionMessageParam[]).push({ role: "tool", tool_call_id: tc.id, content: "cancelled" }); continue; }
           let args: Record<string, unknown> = {};
           try { args = JSON.parse(tc.function.arguments); } catch { /* ignore */ }
           const result = await callMcpTool(tc.function.name, args, ctx, toolMap);
@@ -517,7 +556,8 @@ app.get("/status", (_req, res) => {
 const seenTokenSessions = new Set<string>();
 
 app.post("/chat", async (req: Request, res: Response): Promise<void> => {
-  const { message, session_id } = req.body as { message: string; session_id?: string };
+  const { message, session_id, viewer_session_id } = req.body as { message: string; session_id?: string; viewer_session_id?: string };
+  sessionCtx.enterWith({ sessionId: viewer_session_id });
   const authHeader = req.headers.authorization;
 
   if (!authHeader?.startsWith("Bearer ")) {
@@ -545,14 +585,22 @@ app.post("/chat", async (req: Request, res: Response): Promise<void> => {
   const ctx: RequestContext = {
     userIdToken,
     userEmail,
+    viewerSessionId: viewer_session_id,
     tokenCache: new Map(),
   };
+
+  const controller = new AbortController();
+  // req 'close' fires as soon as the request body is read, not when the response
+  // finishes — aborting on it kills the LLM call almost immediately on every
+  // request. res 'close' fires when the connection actually ends; writableEnded
+  // distinguishes a normal finish from a real client disconnect.
+  res.on("close", () => { if (!res.writableEnded) controller.abort(); });
 
   try {
     const { tools, toolMap } = await discoverAllTools(ctx);
     await runAgentLoop(message, ctx, tools, toolMap, (text) => {
       res.write(text);
-    });
+    }, controller.signal);
   } catch (err) {
     console.error("[P7] Agent error:", err);
     res.write(`\n\n[Agent error: ${String(err)}]`);

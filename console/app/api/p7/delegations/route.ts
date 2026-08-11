@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { OpenFgaClient, CredentialsMethod } from "@openfga/sdk";
 
-async function emitFgaEvent(tool: string, action: "granted" | "revoked", user: string) {
+async function emitFgaEvent(tool: string, action: "granted" | "revoked", user: string, sessionId?: string) {
   const eventBusUrl = process.env.EVENT_BUS_URL ?? "http://event-bus:4000";
   try {
     await fetch(`${eventBusUrl}/emit`, {
@@ -14,6 +14,7 @@ async function emitFgaEvent(tool: string, action: "granted" | "revoked", user: s
         target: "Okta FGA",
         detail: `${action} tool:${tool} for user:${user}`,
         level: "auth",
+        sessionId,
       }),
     });
   } catch {
@@ -37,6 +38,15 @@ function makeFgaClient(): OpenFgaClient {
       },
     },
   });
+}
+
+// This is a shared demo login, so every visitor authenticates as the same Okta
+// user — without this, concurrent demo sessions would read/write the exact same
+// FGA tuples and overwrite each other's delegated-tool grants. Folding the
+// per-page-mount viewerSessionId into the FGA user id gives each browser session
+// its own isolated set of tuples while keeping the same real identity.
+function fgaUserId(email: string, viewerSessionId?: string | null): string {
+  return viewerSessionId ? `${email}::${viewerSessionId}` : email;
 }
 
 function getEmailFromToken(token: string): string | null {
@@ -69,10 +79,12 @@ export async function GET(req: NextRequest) {
   const email = getEmailFromToken(token);
   if (!email) return NextResponse.json({ error: "invalid_token" }, { status: 401 });
 
+  const viewerSessionId = req.nextUrl.searchParams.get("viewer_session_id");
+
   try {
     const fga = makeFgaClient();
     const result = await fga.read({
-      user: `user:${email}`,
+      user: `user:${fgaUserId(email, viewerSessionId)}`,
       relation: "delegated",
       object: "tool:",
     });
@@ -102,7 +114,7 @@ export async function POST(req: NextRequest) {
   const email = getEmailFromToken(token);
   if (!email) return NextResponse.json({ error: "invalid_token" }, { status: 401 });
 
-  const body = await req.json() as { tool?: string };
+  const body = await req.json() as { tool?: string; viewer_session_id?: string };
   const tool = body.tool;
   if (!tool || !ALL_TOOLS.includes(tool)) {
     return NextResponse.json({ error: "invalid_tool" }, { status: 400 });
@@ -111,11 +123,11 @@ export async function POST(req: NextRequest) {
   try {
     const fga = makeFgaClient();
     await fga.writeTuples([{
-      user: `user:${email}`,
+      user: `user:${fgaUserId(email, body.viewer_session_id)}`,
       relation: "delegated",
       object: `tool:${tool}`,
     }]);
-    await emitFgaEvent(tool, "granted", email);
+    await emitFgaEvent(tool, "granted", email, body.viewer_session_id);
     return NextResponse.json({ ok: true });
   } catch (err) {
     console.error("[P7 delegations POST]", err);
@@ -131,7 +143,7 @@ export async function DELETE(req: NextRequest) {
   const email = getEmailFromToken(token);
   if (!email) return NextResponse.json({ error: "invalid_token" }, { status: 401 });
 
-  const body = await req.json() as { tool?: string };
+  const body = await req.json() as { tool?: string; viewer_session_id?: string };
   const tool = body.tool;
   if (!tool || !ALL_TOOLS.includes(tool)) {
     return NextResponse.json({ error: "invalid_tool" }, { status: 400 });
@@ -140,11 +152,11 @@ export async function DELETE(req: NextRequest) {
   try {
     const fga = makeFgaClient();
     await fga.deleteTuples([{
-      user: `user:${email}`,
+      user: `user:${fgaUserId(email, body.viewer_session_id)}`,
       relation: "delegated",
       object: `tool:${tool}`,
     }]);
-    await emitFgaEvent(tool, "revoked", email);
+    await emitFgaEvent(tool, "revoked", email, body.viewer_session_id);
     return NextResponse.json({ ok: true });
   } catch (err) {
     console.error("[P7 delegations DELETE]", err);

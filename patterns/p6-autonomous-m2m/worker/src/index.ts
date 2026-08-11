@@ -4,6 +4,7 @@ import OpenAI from "openai";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { SignJWT, importJWK, importPKCS8, createRemoteJWKSet, jwtVerify } from "jose";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 // ── P6 A2A Worker ──────────────────────────────────────────────────────────────
 // A specialized autonomous agent invoked by the P6 orchestrator via Okta A2A.
@@ -48,12 +49,19 @@ const TX = {
 
 const A2A_JWKS = A2A_ISSUER ? createRemoteJWKSet(new URL(`${A2A_ISSUER}/v1/keys`)) : null;
 
+// Scopes emitted events to the viewer session that triggered the orchestrator request
+// which delegated to this worker, so concurrent browsers watching P6 don't see each other's events.
+const sessionCtx = new AsyncLocalStorage<{ sessionId?: string }>();
+
 async function emitEvent(actor: string, action: string, target: string, detail?: string, tokenSnippet?: string, level = "auth", token?: string) {
   try {
     await fetch(`${EVENT_BUS_URL}/emit`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ patternId: PATTERN_ID, actor, action, target, detail, tokenSnippet, level, token }),
+      body: JSON.stringify({
+        patternId: PATTERN_ID, actor, action, target, detail, tokenSnippet, level, token,
+        sessionId: sessionCtx.getStore()?.sessionId,
+      }),
     });
   } catch {
     // Non-fatal
@@ -200,9 +208,14 @@ async function discoverToolsViaRest(): Promise<ToolDef[]> {
 
 async function callMcpTool(name: string, args: Record<string, unknown>, token: string): Promise<string> {
   await emitEvent(ACTOR, "calling tool", `${WORKER_LABEL} MCP`, `tool=${name}`, undefined, "info");
+  const viewerSessionId = sessionCtx.getStore()?.sessionId;
   const transport = new StreamableHTTPClientTransport(
     new URL(`${MCP_URL}/mcp`),
-    { requestInit: { headers: { Authorization: `Bearer ${token}`, "X-Pattern-Id": PATTERN_ID } } }
+    { requestInit: { headers: {
+      Authorization: `Bearer ${token}`,
+      "X-Pattern-Id": PATTERN_ID,
+      ...(viewerSessionId ? { "X-Session-Id": viewerSessionId } : {}),
+    } } }
   );
   const client = new Client({ name: `p6-${WORKER_DOMAIN}-worker`, version: "1.0.0" });
   await client.connect(transport);
@@ -219,19 +232,21 @@ async function callMcpTool(name: string, args: Record<string, unknown>, token: s
 interface Message { role: "user" | "assistant"; content: string; }
 type ToolExecutor = (name: string, args: Record<string, unknown>) => Promise<string>;
 
-async function runAgentLoop(task: string, callTool: ToolExecutor, tools: ToolDef[]): Promise<string> {
+interface LLMOverrides { anthropicKey?: string; openaiKey?: string; }
+
+async function runAgentLoop(task: string, callTool: ToolExecutor, tools: ToolDef[], overrides?: LLMOverrides): Promise<string> {
   const system = `You are the ${WORKER_LABEL} specialist worker agent in an autonomous multi-agent system. ` +
     `You were invoked by an orchestrator agent via Okta agent-to-agent (A2A) delegation — you validated its access token and are acting under delegated authority. ` +
     `Use your ${WORKER_LABEL} tools to fulfill the orchestrator's task and return a concise, well-structured analysis (markdown). ` +
     `Only use the tools available to you; never fabricate data. Return just your ${WORKER_LABEL} findings — the orchestrator will combine them with other workers' results.`;
   const messages: Message[] = [{ role: "user", content: task }];
-  if (process.env.ANTHROPIC_API_KEY) return runAnthropic(messages, system, callTool, tools);
-  if (process.env.OPENAI_API_KEY) return runOpenAI(messages, system, callTool, tools);
+  if (overrides?.anthropicKey || process.env.ANTHROPIC_API_KEY) return runAnthropic(messages, system, callTool, tools, overrides);
+  if (overrides?.openaiKey || process.env.OPENAI_API_KEY) return runOpenAI(messages, system, callTool, tools, overrides);
   return "No LLM API key configured (ANTHROPIC_API_KEY / OPENAI_API_KEY).";
 }
 
-async function runAnthropic(messages: Message[], system: string, callTool: ToolExecutor, tools: ToolDef[]): Promise<string> {
-  const anthropic = new Anthropic();
+async function runAnthropic(messages: Message[], system: string, callTool: ToolExecutor, tools: ToolDef[], overrides?: LLMOverrides): Promise<string> {
+  const anthropic = new Anthropic({ ...(overrides?.anthropicKey && { apiKey: overrides.anthropicKey }) });
   const anthropicTools: Anthropic.Tool[] = tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.inputSchema as Anthropic.Tool["input_schema"] }));
   let msgs: Anthropic.MessageParam[] = messages.map((m) => ({ role: m.role, content: m.content }));
   let out = "";
@@ -254,8 +269,8 @@ async function runAnthropic(messages: Message[], system: string, callTool: ToolE
   return out;
 }
 
-async function runOpenAI(messages: Message[], system: string, callTool: ToolExecutor, tools: ToolDef[]): Promise<string> {
-  const openai = new OpenAI();
+async function runOpenAI(messages: Message[], system: string, callTool: ToolExecutor, tools: ToolDef[], overrides?: LLMOverrides): Promise<string> {
+  const openai = new OpenAI({ ...(overrides?.openaiKey && { apiKey: overrides.openaiKey }) });
   const openaiTools: OpenAI.ChatCompletionTool[] = tools.map((t) => ({ type: "function" as const, function: { name: t.name, description: t.description, parameters: t.inputSchema } }));
   let msgs: OpenAI.ChatCompletionMessageParam[] = [{ role: "system", content: system }, ...messages.map((m) => ({ role: m.role, content: m.content }))];
   let out = "";
@@ -280,7 +295,7 @@ const app = express();
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-LLM-Api-Key, X-LLM-Provider");
   if (req.method === "OPTIONS") { res.sendStatus(200); return; }
   next();
 });
@@ -291,8 +306,9 @@ app.get("/health", (_req, res) => {
 });
 
 app.post("/invoke", async (req, res) => {
-  const { task } = req.body as { task?: string };
+  const { task, sessionId } = req.body as { task?: string; sessionId?: string };
   if (!task) { res.status(400).json({ error: "task required" }); return; }
+  sessionCtx.enterWith({ sessionId });
 
   // 1. Validate the orchestrator's A2A token (delegation gate)
   let claims: InboundClaims;
@@ -312,9 +328,15 @@ app.post("/invoke", async (req, res) => {
     const domainToken = await exchangeForDomainToken(req.headers.authorization!.slice(7));
 
     // 3. Run the domain LLM loop over MCP tools
+    const llmOverrides: LLMOverrides = {
+      anthropicKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] !== "openai"
+        ? String(req.headers["x-llm-api-key"]) : undefined,
+      openaiKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] === "openai"
+        ? String(req.headers["x-llm-api-key"]) : undefined,
+    };
     const tools = await discoverToolsViaRest();
     const callTool: ToolExecutor = (name, args) => callMcpTool(name, args, domainToken);
-    const summary = await runAgentLoop(task, callTool, tools);
+    const summary = await runAgentLoop(task, callTool, tools, llmOverrides);
 
     await emitEvent(ACTOR, "torn down", "orchestrator", "task complete", undefined, "info");
     res.json({ ok: true, label: WORKER_LABEL, summary });

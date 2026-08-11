@@ -8,6 +8,7 @@ async function emitEvent(
   detail?: string,
   token?: string,
   level: "info" | "auth" | "token" | "error" = "info",
+  sessionId?: string,
 ) {
   const eventBusUrl = process.env.EVENT_BUS_URL;
   if (!eventBusUrl) return;
@@ -24,12 +25,17 @@ async function emitEvent(
       detail,
       token,
       level,
+      sessionId,
     }),
   }).catch(() => {});
 }
 
 export async function POST(req: NextRequest) {
-  const { message, session_id } = (await req.json()) as { message: string; session_id?: string };
+  const { message, session_id, viewer_session_id } = (await req.json()) as {
+    message: string;
+    session_id?: string;
+    viewer_session_id?: string;
+  };
 
   const tokenUrl = `https://${process.env.OKTA_DOMAIN}/oauth2/${process.env.P6_ORCH_A2A_AUTHZ_SERVER_ID}/v1/token`;
 
@@ -40,6 +46,7 @@ export async function POST(req: NextRequest) {
     `grant_type=client_credentials\nscope=agent.invoke\nresource=${process.env.P6_ORCH_A2A_RESOURCE ?? ""}`,
     undefined,
     "auth",
+    viewer_session_id,
   );
 
   const tokenResp = await fetch(tokenUrl, {
@@ -56,7 +63,7 @@ export async function POST(req: NextRequest) {
 
   if (!tokenResp.ok) {
     const err = await tokenResp.text();
-    await emitEvent("Console", "CC grant failed", "Okta", err, undefined, "error");
+    await emitEvent("Console", "CC grant failed", "Okta", err, undefined, "error", viewer_session_id);
     return NextResponse.json({ error: `CC grant failed: ${err}` }, { status: 502 });
   }
 
@@ -69,7 +76,11 @@ export async function POST(req: NextRequest) {
     "scope=agent.invoke — invoking orchestrator",
     access_token,
     "token",
+    viewer_session_id,
   );
+
+  const llmApiKey = req.headers.get("x-llm-api-key");
+  const llmProvider = req.headers.get("x-llm-provider");
 
   const agentUrl = process.env.P6_AGENT_INTERNAL_URL ?? "http://p6-agent:3600";
   const invokeResp = await fetch(`${agentUrl}/invoke`, {
@@ -77,12 +88,13 @@ export async function POST(req: NextRequest) {
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${access_token}`,
+      ...(llmApiKey ? { "X-LLM-Api-Key": llmApiKey, "X-LLM-Provider": llmProvider ?? "anthropic" } : {}),
     },
-    body: JSON.stringify({ message, session_id }),
+    body: JSON.stringify({ message, session_id, viewer_session_id }),
   });
 
   if (!invokeResp.ok || !invokeResp.body) {
-    await emitEvent("Console", "invoke failed", "P6 Orchestrator", `HTTP ${invokeResp.status}`, undefined, "error");
+    await emitEvent("Console", "invoke failed", "P6 Orchestrator", `HTTP ${invokeResp.status}`, undefined, "error", viewer_session_id);
     return NextResponse.json({ error: `Invoke failed: HTTP ${invokeResp.status}` }, { status: 502 });
   }
 
