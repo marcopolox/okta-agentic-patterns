@@ -59,7 +59,7 @@ Shared MCP Resource Servers
 ## Repository Layout
 
 ```
-okta-agentic-demo/
+okta-agentic-patterns/
 ├── console/                  ← Next.js UI (port 3020)
 ├── shared/
 │   ├── event-bus/            ← SSE relay (port 4000)

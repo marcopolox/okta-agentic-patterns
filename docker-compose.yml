@@ -135,7 +135,7 @@ services:
       # Browser-accessible adapter URL for auth redirects embedded in auth links
       MCP_ADAPTER_PUBLIC_URL: ${MCP_ADAPTER_URL:-}
       # Direct inventory server URL — used for unauthenticated tool discovery (adapter requires auth)
-      INVENTORY_MCP_URL: http://inventory-server:3103
+      INVENTORY_SERVER_URL: http://inventory-server:3103
       # Console base URL — used to build the redirect_uri in the auth flow
       CONSOLE_URL: ${NEXTAUTH_URL:-http://localhost:3020}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
@@ -157,7 +157,11 @@ services:
       EVENT_BUS_URL: http://event-bus:4000
       OKTA_DOMAIN: ${OKTA_DOMAIN:-}
       OKTA_ISSUER: ${OKTA_ISSUER}
-      OKTA_CLIENT_ID: ${P3_OKTA_CLIENT_ID:-}
+      # Deliberately NOT set here: the agent's client-assertion identity must fall back to
+      # OKTA_AI_AGENT_ID. The shared okta-demo-p3-p4-shared app (P3_OKTA_CLIENT_ID) is
+      # token_endpoint_auth_method=client_secret_basic with no JWKS — a client_assertion
+      # signed as that client_id is rejected with client_assertion_jwks_not_configured.
+      # OKTA_CLIENT_ID: ${P3_OKTA_CLIENT_ID:-}
       OKTA_AI_AGENT_ID: ${P3_OKTA_AI_AGENT_ID:-}
       OKTA_PRIVATE_KEY: ${P3_OKTA_PRIVATE_KEY:-}
       PROTECTED_API_URL: http://hr-server:3101

@@ -31,5 +31,14 @@ export async function GET(req: NextRequest) {
     maxAge: 300,
     path: "/",
   });
+  const viewerSessionId = req.nextUrl.searchParams.get("viewer_session_id");
+  if (viewerSessionId) {
+    response.cookies.set("p6_viewer_session", viewerSessionId, {
+      httpOnly: true,
+      sameSite: "lax",
+      maxAge: 300,
+      path: "/",
+    });
+  }
   return response;
 }

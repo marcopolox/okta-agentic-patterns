@@ -29,6 +29,7 @@ export interface Pattern {
   buildStatus: "done" | "pending" | "blocked"; // drives landing page card border color
   note?: string; // optional note shown on the landing page card (e.g. requirements)
   disabled?: boolean; // when true, grayed out on the landing page and the detail route is blocked
+  hideCta?: boolean; // when true, suppresses the landing page "Run Demo" button even if active
   mcpServers?: McpServerDef[]; // MCP resource servers used by this pattern
   platforms?: PlatformLink[]; // P8: per-platform video (detail page) + architecture diagram (landing card) links
 }
@@ -48,6 +49,7 @@ export const PATTERNS: Pattern[] = [
     agentHealthUrl: process.env.P1_AGENT_INTERNAL_URL,
     rightPanel: "connection-guide",
     buildStatus: "done",
+    hideCta: true,
     mcpServers: [
       {
         name: "HR Server MCP",

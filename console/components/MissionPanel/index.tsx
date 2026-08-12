@@ -13,12 +13,11 @@ export interface Mission {
   prompt: string;
   scheduleLabel: string;
   blockedReason?: string;
-  apiRoute?: string;       // if set, POST to this Next.js API route instead of ${agentUrl}/chat
+  apiRoute?: string;       // if set, POST to this Next.js API route instead of /api/chat/[patternId]
   requiresUserToken?: boolean; // if true, show a login gate when no userToken is available
 }
 
 interface MissionPanelProps {
-  agentUrl: string;
   patternId: PatternId;
   viewerSessionId?: string;
   disabled: boolean;
@@ -33,7 +32,6 @@ interface MissionPanelProps {
 }
 
 export function MissionPanel({
-  agentUrl,
   patternId,
   viewerSessionId,
   disabled,
@@ -51,11 +49,20 @@ export function MissionPanel({
   const [lastRanId, setLastRanId] = useState<string | null>(null);
   const sessionId = useRef(`${patternId}-${Date.now()}`);
   const resultEndRef = useRef<HTMLDivElement>(null);
+  const prevMissionIdRef = useRef<string | null>(null);
   const { credentialHeaders } = useDemoCredentials();
 
   useEffect(() => {
     resultEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [result]);
+
+  useEffect(() => {
+    if (prevMissionIdRef.current !== null && selectedMissionId !== null && selectedMissionId !== prevMissionIdRef.current) {
+      setResult("");
+      setLastRanId(null);
+    }
+    prevMissionIdRef.current = selectedMissionId;
+  }, [selectedMissionId]);
 
   async function runMission(mission: Mission) {
     if (runningId || disabled) return;
@@ -67,7 +74,7 @@ export function MissionPanel({
     onRunStateChange?.(() => controller.abort());
 
     try {
-      const url = mission.apiRoute ?? `${agentUrl}/chat`;
+      const url = mission.apiRoute ?? `/api/chat/${patternId}`;
       const res = await fetch(url, {
         method: "POST",
         headers: {
@@ -210,7 +217,7 @@ export function MissionPanel({
               {isSelected && (
                 mission.requiresUserToken && !userToken ? (
                   <a
-                    href={`/api/auth/start/${patternId}`}
+                    href={`/api/auth/start/${patternId}${viewerSessionId ? `?viewer_session_id=${encodeURIComponent(viewerSessionId)}` : ""}`}
                     onClick={(e) => e.stopPropagation()}
                     className="mt-auto flex w-full items-center justify-center gap-2 rounded-lg border border-blue-500/30 bg-blue-500/10 py-2 text-xs font-medium text-blue-400 hover:bg-blue-500/20 transition-colors"
                   >

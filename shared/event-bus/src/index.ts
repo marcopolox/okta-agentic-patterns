@@ -146,19 +146,25 @@ app.get("/events/:patternId", (req: Request, res: Response) => {
   });
 });
 
-// DELETE /events/:patternId?sessionId=... — clear buffer and notify connected clients
-// for this session only (e.g. on logout or the console's "Clear" button)
+// DELETE /events/:patternId?sessionId=... — clear this session's buffer, and also the
+// pattern's shared/session-less buffer (agent-restart pings, pre-login auth events, etc.)
+// so stale entries don't keep getting replayed into every other viewer's stream either.
+// Notifies every session currently subscribed to this pattern, not just the requester.
 app.delete("/events/:patternId", (req: Request, res: Response) => {
   const { patternId } = req.params;
   const sessionId = String(req.query.sessionId ?? SHARED_SESSION);
   const compositeKey = key(patternId, sessionId);
 
   recentEvents.delete(compositeKey);
-  const subs = subscribers.get(compositeKey);
-  if (subs) {
-    const data = `data: ${JSON.stringify({ type: "clear" })}\n\n`;
-    for (const client of subs) {
-      try { client.write(data); } catch { /* disconnected */ }
+  sharedRecentEvents.delete(patternId);
+
+  const data = `data: ${JSON.stringify({ type: "clear" })}\n\n`;
+  for (const sid of patternSessions.get(patternId) ?? []) {
+    const subs = subscribers.get(key(patternId, sid));
+    if (subs) {
+      for (const client of subs) {
+        try { client.write(data); } catch { /* disconnected */ }
+      }
     }
   }
   res.json({ ok: true });

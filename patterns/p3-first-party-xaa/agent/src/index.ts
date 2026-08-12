@@ -5,13 +5,22 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { SignJWT, importJWK, importPKCS8 } from "jose";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { randomUUID } from "node:crypto";
+
+// Carries the console viewer's SSE session id across the async call chain of a single
+// /chat request, so emitEvent() can scope events to that viewer without threading a
+// sessionId parameter through every helper function that calls it.
+const requestContext = new AsyncLocalStorage<{ sessionId?: string }>();
 
 const PORT = parseInt(process.env.PORT ?? "3300");
 const EVENT_BUS_URL = process.env.EVENT_BUS_URL ?? "http://localhost:4000";
 const OKTA_DOMAIN = process.env.OKTA_DOMAIN ?? "";
 const OKTA_AI_AGENT_ID = process.env.OKTA_AI_AGENT_ID ?? "";
+const OKTA_CLIENT_ID = process.env.OKTA_CLIENT_ID ?? "";
 const OKTA_PRIVATE_KEY = process.env.OKTA_PRIVATE_KEY ?? "";
+// Client assertions authenticate as this OAuth client at Okta's token endpoint. Newer agents are
+// bound to an existing app's client_id rather than having their own; falls back to the agent ID
+// for agents that are their own client.
+const AGENT_CLIENT_ID = OKTA_CLIENT_ID || OKTA_AI_AGENT_ID;
 const HR_API_URL = process.env.PROTECTED_API_URL ?? "http://hr-server:3101";
 const FINANCE_API_URL = process.env.FINANCE_API_URL ?? "http://finance-server:3102";
 // Audience strings: link Docker-internal URLs to Okta connections; also used for static fallback
@@ -207,19 +216,13 @@ async function loadAgentConnections(): Promise<void> {
   }
 }
 
-// Scopes emitted events to the viewer session that triggered the request currently
-// in flight, so concurrent browsers watching this pattern don't see each other's events.
-const sessionCtx = new AsyncLocalStorage<{ sessionId?: string }>();
-
-async function emitEvent(actor: string, action: string, target: string, detail?: string, tokenSnippet?: string, level = "auth", token?: string, callId?: string) {
+async function emitEvent(actor: string, action: string, target: string, detail?: string, tokenSnippet?: string, level = "auth", token?: string) {
+  const sessionId = requestContext.getStore()?.sessionId;
   try {
     await fetch(`${EVENT_BUS_URL}/emit`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        patternId: PATTERN_ID, actor, action, target, detail, tokenSnippet, level, token, callId,
-        sessionId: sessionCtx.getStore()?.sessionId,
-      }),
+      body: JSON.stringify({ patternId: PATTERN_ID, actor, action, target, detail, tokenSnippet, level, token, sessionId }),
     });
   } catch {
     // Non-fatal
@@ -239,8 +242,8 @@ async function buildAgentJwt(audience: string): Promise<string> {
   }
   return new SignJWT({})
     .setProtectedHeader({ alg: "RS256", ...(kid ? { kid } : {}) })
-    .setIssuer(OKTA_AI_AGENT_ID)
-    .setSubject(OKTA_AI_AGENT_ID)
+    .setIssuer(AGENT_CLIENT_ID)
+    .setSubject(AGENT_CLIENT_ID)
     .setAudience(audience)
     .setIssuedAt(now)
     .setExpirationTime(now + 300)
@@ -272,7 +275,7 @@ async function getIdJag(userIdToken: string, issuerUrl: string, scopes: string[]
     `  ${p("audience")} = ${authzUrl}\n` +
     `  ${p("scope")} = ${scope}\n` +
     `  ${p("client_assertion_type")} = urn:ietf:params:oauth:client-assertion-type:jwt-bearer\n` +
-    `  ${p("client_assertion")} = ${clientAssertion.slice(0, 20)}… (iss=sub=${OKTA_AI_AGENT_ID})`;
+    `  ${p("client_assertion")} = ${clientAssertion.slice(0, 20)}… (iss=sub=${AGENT_CLIENT_ID})`;
 
   console.log(`\n[XAA Step 1 — ID-JAG Request]\n  ${requestDetail.replace(/\n/g, "\n  ")}`);
   await emitEvent("P3 Agent", "XAA Step 1 — ID-JAG request", "Okta Org Server", requestDetail, undefined, "auth");
@@ -315,7 +318,7 @@ async function getStep2Token(idJag: string, issuerUrl: string, audience: string,
     `  ${p2("grant_type")} = urn:ietf:params:oauth:grant-type:jwt-bearer\n` +
     `  ${p2("assertion")} = ${idJag.slice(0, 16)}… (ID-JAG from Step 1)\n` +
     `  ${p2("client_assertion_type")} = urn:ietf:params:oauth:client-assertion-type:jwt-bearer\n` +
-    `  ${p2("client_assertion")} = ${clientAssertion.slice(0, 20)}… (iss=sub=${OKTA_AI_AGENT_ID})\n` +
+    `  ${p2("client_assertion")} = ${clientAssertion.slice(0, 20)}… (iss=sub=${AGENT_CLIENT_ID})\n` +
     `  [scope omitted — scopes are locked inside the ID-JAG]`;
 
   console.log(`\n[XAA Step 2 — Resource Token Request]\n  ${requestDetail2.replace(/\n/g, "\n  ")}`);
@@ -499,7 +502,6 @@ async function callMcpTool(name: string, args: Record<string, unknown>, ctx: Req
 
   const scopes = getScopesForTool(name, server.scopes);
   const label = `${server.label} Server`;
-  const callId = randomUUID().slice(0, 8);
 
   let token: string;
   try {
@@ -510,17 +512,11 @@ async function callMcpTool(name: string, args: Record<string, unknown>, ctx: Req
     return `Access to "${name}" is not permitted for this user due to an Okta policy restriction.`;
   }
 
-  await emitEvent("P3 Agent", "calling tool", label, `tool=${name} scopes=${scopes.join(",")}`, undefined, "info", undefined, callId);
+  await emitEvent("P3 Agent", "calling tool", label, `tool=${name} scopes=${scopes.join(",")}`, undefined, "info");
 
-  const viewerSessionId = sessionCtx.getStore()?.sessionId;
   const transport = new StreamableHTTPClientTransport(
     new URL(`${server.url}/mcp`),
-    { requestInit: { headers: {
-      Authorization: `Bearer ${token}`,
-      "X-Pattern-Id": PATTERN_ID,
-      ...(viewerSessionId ? { "X-Session-Id": viewerSessionId } : {}),
-      "X-Call-Id": callId,
-    } } }
+    { requestInit: { headers: { Authorization: `Bearer ${token}`, "X-Pattern-Id": PATTERN_ID } } }
   );
   const client = new Client({ name: "p3-agent", version: "1.0.0" });
   await client.connect(transport);
@@ -618,6 +614,8 @@ async function* runAnthropic(
       toolResults.push({ type: "tool_result", tool_use_id: tool.id, content: result });
     }
 
+    await emitEvent("P3 Agent", "tool results ready", "LLM", "Data received from all the tools. Sent to LLM for processing.", undefined, "info");
+
     msgs = [
       ...msgs,
       { role: "assistant", content: response.content },
@@ -663,6 +661,8 @@ async function* runOpenAI(
       const result = await callTool(tc.function.name, args);
       toolResults.push({ role: "tool", tool_call_id: tc.id, content: result });
     }
+
+    await emitEvent("P3 Agent", "tool results ready", "LLM", "Data received from all the tools. Sent to LLM for processing.", undefined, "info");
 
     msgs = [...msgs, choice.message, ...toolResults];
   }
@@ -710,13 +710,21 @@ app.post("/refresh", async (_req, res) => {
 });
 
 app.post("/chat", async (req, res) => {
-  const { message, session_id, viewer_session_id } = req.body as { message: string; session_id?: string; viewer_session_id?: string };
+  const { message, session_id, viewer_session_id } = req.body as {
+    message: string;
+    session_id?: string;
+    viewer_session_id?: string;
+  };
 
   if (!message) {
     res.status(400).json({ error: "message required" });
     return;
   }
-  sessionCtx.enterWith({ sessionId: viewer_session_id });
+
+  await requestContext.run({ sessionId: viewer_session_id }, () => handleChat(req, res, message, session_id));
+});
+
+async function handleChat(req: express.Request, res: express.Response, message: string, session_id?: string) {
 
   const llmOverrides: LLMOverrides = {
     anthropicKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] !== "openai"
@@ -817,7 +825,7 @@ app.post("/chat", async (req, res) => {
   }
 
   res.end();
-});
+}
 
 app.listen(PORT, () => {
   console.log(`P3 agent listening on :${PORT}`);

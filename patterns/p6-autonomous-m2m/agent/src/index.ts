@@ -2,7 +2,6 @@ import express from "express";
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { SignJWT, importJWK, importPKCS8, createRemoteJWKSet, jwtVerify } from "jose";
-import { AsyncLocalStorage } from "node:async_hooks";
 
 // ── P6 Orchestrator — Agent-to-Agent (A2A) delegation ──────────────────────────
 // A user authenticates through the console (app) and kicks off the orchestrator,
@@ -169,19 +168,12 @@ async function loadA2AConnections(): Promise<void> {
   console.log(`[Okta] Loaded ${discoveredWorkers.length} active A2A worker(s): ${discoveredWorkers.map((w) => w.label).join(", ") || "(none)"}`);
 }
 
-// Scopes emitted events to the viewer session that triggered the request currently
-// in flight, so concurrent browsers watching this pattern don't see each other's events.
-const sessionCtx = new AsyncLocalStorage<{ sessionId?: string }>();
-
 async function emitEvent(actor: string, action: string, target: string, detail?: string, tokenSnippet?: string, level = "auth", token?: string) {
   try {
     await fetch(`${EVENT_BUS_URL}/emit`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        patternId: PATTERN_ID, actor, action, target, detail, tokenSnippet, level, token,
-        sessionId: sessionCtx.getStore()?.sessionId,
-      }),
+      body: JSON.stringify({ patternId: PATTERN_ID, actor, action, target, detail, tokenSnippet, level, token }),
     });
   } catch {
     // Non-fatal
@@ -298,14 +290,15 @@ async function invokeWorker(worker: WorkerCfg, subjectToken: string, task: strin
   const a2aToken = await getA2AToken(idJag, worker);
   await emitEvent("P6 Orchestrator", "invoking worker", `${worker.label} Worker`, `task=${task.slice(0, 80)}`, undefined, "info");
 
-  const llmHeaders: Record<string, string> = {};
-  if (overrides?.anthropicKey) { llmHeaders["X-LLM-Api-Key"] = overrides.anthropicKey; llmHeaders["X-LLM-Provider"] = "anthropic"; }
-  else if (overrides?.openaiKey) { llmHeaders["X-LLM-Api-Key"] = overrides.openaiKey; llmHeaders["X-LLM-Provider"] = "openai"; }
-
   const resp = await fetch(`${worker.workerUrl}/invoke`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${a2aToken}`, ...llmHeaders },
-    body: JSON.stringify({ task, sessionId: sessionCtx.getStore()?.sessionId }),
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${a2aToken}`,
+      ...(overrides?.anthropicKey && { "X-LLM-Api-Key": overrides.anthropicKey, "X-LLM-Provider": "anthropic" }),
+      ...(overrides?.openaiKey && { "X-LLM-Api-Key": overrides.openaiKey, "X-LLM-Provider": "openai" }),
+    },
+    body: JSON.stringify({ task }),
   });
   const data = await resp.json().catch(() => ({})) as { ok?: boolean; summary?: string; error?: string };
   if (!resp.ok || !data.ok) {
@@ -418,6 +411,7 @@ async function* runAnthropic(messages: Message[], system: string, callTool: Tool
       const result = await callTool(tool.name, tool.input as Record<string, unknown>);
       toolResults.push({ type: "tool_result", tool_use_id: tool.id, content: result });
     }
+    await emitEvent("P6 Orchestrator", "tool results ready", "LLM", "Data received from all the tools. Sent to LLM for processing.", undefined, "info");
     msgs = [...msgs, { role: "assistant", content: response.content }, { role: "user", content: toolResults }];
   }
 }
@@ -441,6 +435,7 @@ async function* runOpenAI(messages: Message[], system: string, callTool: ToolExe
       const result = await callTool(tc.function.name, args);
       toolResults.push({ role: "tool", tool_call_id: tc.id, content: result });
     }
+    await emitEvent("P6 Orchestrator", "tool results ready", "LLM", "Data received from all the tools. Sent to LLM for processing.", undefined, "info");
     msgs = [...msgs, choice.message, ...toolResults];
   }
 }
@@ -503,9 +498,8 @@ const sessions = new Map<string, Message[]>();
 const seenTokenSessions = new Set<string>();
 
 app.post("/chat", async (req, res) => {
-  const { message, session_id, viewer_session_id } = req.body as { message: string; session_id?: string; viewer_session_id?: string };
+  const { message, session_id } = req.body as { message: string; session_id?: string };
   if (!message) { res.status(400).json({ error: "message required" }); return; }
-  sessionCtx.enterWith({ sessionId: viewer_session_id });
 
   const llmOverrides: LLMOverrides = {
     anthropicKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] !== "openai"
@@ -565,9 +559,18 @@ app.post("/chat", async (req, res) => {
 const invokeSessions = new Map<string, Message[]>();
 
 app.post("/invoke", async (req, res) => {
-  const { message, session_id, viewer_session_id } = req.body as { message: string; session_id?: string; viewer_session_id?: string };
+  const { message, session_id } = req.body as { message: string; session_id?: string };
   if (!message) { res.status(400).json({ error: "message required" }); return; }
-  sessionCtx.enterWith({ sessionId: viewer_session_id });
+
+  const llmOverrides: LLMOverrides = {
+    anthropicKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] !== "openai"
+      ? String(req.headers["x-llm-api-key"]) : undefined,
+    openaiKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] === "openai"
+      ? String(req.headers["x-llm-api-key"]) : undefined,
+  };
+  const slackToken = req.headers["x-slack-token"] ? String(req.headers["x-slack-token"]) : undefined;
+  const slackChannel = req.headers["x-slack-channel"] ? String(req.headers["x-slack-channel"]) : undefined;
+
   let claims: InboundCCClaims;
   try {
     claims = await validateInboundCCToken(req.headers.authorization);
@@ -583,12 +586,6 @@ app.post("/invoke", async (req, res) => {
   res.setHeader("Content-Type", "text/plain; charset=utf-8");
   res.setHeader("Transfer-Encoding", "chunked");
   const ccToken = req.headers.authorization!.slice(7);
-  const llmOverrides: LLMOverrides = {
-    anthropicKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] !== "openai"
-      ? String(req.headers["x-llm-api-key"]) : undefined,
-    openaiKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] === "openai"
-      ? String(req.headers["x-llm-api-key"]) : undefined,
-  };
   const controller = new AbortController();
   // req 'close' fires as soon as the request body is read, not when the response
   // finishes — aborting on it kills the LLM call almost immediately on every
@@ -597,7 +594,7 @@ app.post("/invoke", async (req, res) => {
   res.on("close", () => { if (!res.writableEnded) controller.abort(); });
   try {
     let fullResponse = "";
-    for await (const chunk of runOrchestration(message, history, ccToken, llmOverrides, undefined, undefined, TX_CC, controller.signal)) {
+    for await (const chunk of runOrchestration(message, history, ccToken, llmOverrides, slackToken, slackChannel, TX_CC, controller.signal)) {
       fullResponse += chunk;
       res.write(chunk);
     }

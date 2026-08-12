@@ -4,6 +4,11 @@
 *.env.local
 patterns/**/adapter-config/.env
 
+# Deployment notes — contain live infra details (IPs, ports, internal URLs), not for public repo
+AWS_DEPLOYMENT.md
+*_DEPLOYMENT_PLAN.md
+*_DEPLOYMENT.md
+
 # AI assistant context files — not needed for running the app
 CLAUDE.md
 AGENTS.md

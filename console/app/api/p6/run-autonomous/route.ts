@@ -81,6 +81,8 @@ export async function POST(req: NextRequest) {
 
   const llmApiKey = req.headers.get("x-llm-api-key");
   const llmProvider = req.headers.get("x-llm-provider");
+  const slackToken = req.headers.get("x-slack-token");
+  const slackChannel = req.headers.get("x-slack-channel");
 
   const agentUrl = process.env.P6_AGENT_INTERNAL_URL ?? "http://p6-agent:3600";
   const invokeResp = await fetch(`${agentUrl}/invoke`, {
@@ -89,6 +91,8 @@ export async function POST(req: NextRequest) {
       "Content-Type": "application/json",
       Authorization: `Bearer ${access_token}`,
       ...(llmApiKey ? { "X-LLM-Api-Key": llmApiKey, "X-LLM-Provider": llmProvider ?? "anthropic" } : {}),
+      ...(slackToken ? { "X-Slack-Token": slackToken } : {}),
+      ...(slackChannel ? { "X-Slack-Channel": slackChannel } : {}),
     },
     body: JSON.stringify({ message, session_id, viewer_session_id }),
   });

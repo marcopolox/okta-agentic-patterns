@@ -4,7 +4,6 @@ import OpenAI from "openai";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { randomBytes, createHash } from "crypto";
-import { AsyncLocalStorage } from "node:async_hooks";
 
 const PORT = parseInt(process.env.PORT ?? "3200");
 const EVENT_BUS_URL = process.env.EVENT_BUS_URL ?? "http://localhost:4000";
@@ -12,16 +11,13 @@ const EVENT_BUS_URL = process.env.EVENT_BUS_URL ?? "http://localhost:4000";
 const MCP_ADAPTER_URL = process.env.MCP_ADAPTER_URL ?? "http://localhost:8008";
 // Browser-accessible URL used to build auth links shown to the user
 const MCP_ADAPTER_PUBLIC_URL = process.env.MCP_ADAPTER_PUBLIC_URL ?? MCP_ADAPTER_URL;
-// Direct URL to Inventory MCP server — used for unauthenticated connections (adapter requires auth for /mcp)
-const INVENTORY_MCP_URL = process.env.INVENTORY_MCP_URL ?? "http://localhost:3103";
+// Inventory resource server — used directly (bypassing the adapter) for anonymous public-catalog
+// browsing, since the adapter requires auth on every MCP call and has no anonymous discovery path.
+const INVENTORY_SERVER_URL = process.env.INVENTORY_SERVER_URL ?? "http://localhost:3103";
 // Console base URL — combined with /callback to form the PKCE redirect_uri
 const CONSOLE_URL = process.env.CONSOLE_URL ?? "http://localhost:3020";
 const REDIRECT_URI = `${CONSOLE_URL}/callback`;
 const PATTERN_ID = "p2";
-
-// Scopes emitted events to the viewer session that triggered the request currently
-// in flight, so concurrent browsers watching this pattern don't see each other's events.
-const sessionCtx = new AsyncLocalStorage<{ sessionId?: string }>();
 
 async function emitEvent(
   actor: string,
@@ -36,10 +32,7 @@ async function emitEvent(
     await fetch(`${EVENT_BUS_URL}/emit`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        patternId: PATTERN_ID, actor, action, target, detail, tokenSnippet, level, token,
-        sessionId: sessionCtx.getStore()?.sessionId,
-      }),
+      body: JSON.stringify({ patternId: PATTERN_ID, actor, action, target, detail, tokenSnippet, level, token }),
     });
   } catch {
     // Non-fatal
@@ -156,19 +149,17 @@ Never fabricate stock numbers or order details.`;
 
 async function getMcpClient(accessToken?: string): Promise<{ client: Client; tools: ToolDef[] }> {
   const headers: Record<string, string> = {};
+  // Authenticated calls go through the adapter (DCR/PKCE flow, real 3rd-party OAuth pattern).
+  // Unauthenticated browsing connects directly to the resource server, which already has its
+  // own public/private tool gating — the adapter has no anonymous discovery path.
+  const baseUrl = accessToken ? MCP_ADAPTER_URL : INVENTORY_SERVER_URL;
   if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
-  const viewerSessionId = sessionCtx.getStore()?.sessionId;
-  if (viewerSessionId) headers["X-Session-Id"] = viewerSessionId;
-
-  // Unauthenticated: connect directly to inventory server (adapter requires auth even for tools/list)
-  // Authenticated: connect through adapter so the adapter can perform its own token validation.
   // The adapter proxies multiple resources — inventory-server is registered there as
   // "mcp-server-retail", so authenticated calls must target its namespaced path.
-  const mcpEndpoint = accessToken ? `${MCP_ADAPTER_URL}/mcp-server-retail/mcp` : `${INVENTORY_MCP_URL}/mcp`;
-  const targetLabel = accessToken ? "MCP Adapter" : "Inventory Server";
-
+  // Unauthenticated calls bypass the adapter entirely (bare /mcp on inventory-server directly).
+  const mcpPath = accessToken ? "/mcp-server-retail/mcp" : "/mcp";
   const transport = new StreamableHTTPClientTransport(
-    new URL(mcpEndpoint),
+    new URL(`${baseUrl}${mcpPath}`),
     { requestInit: { headers } }
   );
   const client = new Client({ name: "p2-consumer-agent", version: "1.0.0" });
@@ -178,7 +169,7 @@ async function getMcpClient(accessToken?: string): Promise<{ client: Client; too
   await emitEvent(
     "Consumer Agent",
     "discovered tools",
-    targetLabel,
+    accessToken ? "MCP Adapter" : "Inventory Server",
     `count=${visibleTools.length}${accessToken ? " (full access)" : " (public only)"}`,
     undefined,
     "info"
@@ -195,8 +186,8 @@ async function getMcpClient(accessToken?: string): Promise<{ client: Client; too
 
 interface TextContent { type: "text"; text: string }
 
-async function callMcpTool(client: Client, name: string, args: Record<string, unknown>, target = "MCP Adapter"): Promise<string> {
-  await emitEvent("Consumer Agent", "calling tool", target, `tool=${name}`, undefined, "info");
+async function callMcpTool(client: Client, name: string, args: Record<string, unknown>): Promise<string> {
+  await emitEvent("Consumer Agent", "calling tool", "MCP Adapter", `tool=${name}`, undefined, "info");
   const result = await client.callTool({ name, arguments: args });
   const content = result.content as TextContent[];
   return content.filter((c) => c.type === "text").map((c) => c.text).join("\n");
@@ -265,6 +256,7 @@ async function* runAnthropic(
       const result = await callMcpTool(client, tool.name, tool.input as Record<string, unknown>);
       toolResults.push({ type: "tool_result", tool_use_id: tool.id, content: result });
     }
+    await emitEvent("Consumer Agent", "tool results ready", "LLM", "Data received from all the tools. Sent to LLM for processing.", undefined, "info");
     msgs = [...msgs, { role: "assistant", content: response.content }, { role: "user", content: toolResults }];
   }
 }
@@ -309,6 +301,7 @@ async function* runOpenAI(
       const result = await callMcpTool(client, tc.function.name, args);
       toolResults.push({ role: "tool", tool_call_id: tc.id, content: result });
     }
+    await emitEvent("Consumer Agent", "tool results ready", "LLM", "Data received from all the tools. Sent to LLM for processing.", undefined, "info");
     msgs = [...msgs, choice.message, ...toolResults];
   }
 }
@@ -330,9 +323,8 @@ app.get("/health", (_req, res) => {
 });
 
 app.post("/chat", async (req, res) => {
-  const { message, session_id, viewer_session_id } = req.body as { message: string; session_id?: string; viewer_session_id?: string };
+  const { message, session_id } = req.body as { message: string; session_id?: string };
   if (!message) { res.status(400).json({ error: "message required" }); return; }
-  sessionCtx.enterWith({ sessionId: viewer_session_id });
 
   const llmOverrides: LLMOverrides = {
     anthropicKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] !== "openai"
@@ -353,13 +345,6 @@ app.post("/chat", async (req, res) => {
 
   res.setHeader("Content-Type", "text/plain; charset=utf-8");
   res.setHeader("Transfer-Encoding", "chunked");
-
-  const controller = new AbortController();
-  // req 'close' fires as soon as the request body is read, not when the response
-  // finishes — aborting on it kills the LLM call almost immediately on every
-  // request. res 'close' fires when the connection actually ends; writableEnded
-  // distinguishes a normal finish from a real client disconnect.
-  res.on("close", () => { if (!res.writableEnded) controller.abort(); });
 
   let client: Client | null = null;
   let tools: ToolDef[] = [];
@@ -413,6 +398,13 @@ app.post("/chat", async (req, res) => {
     }
     system = buildPublicOnlySystem(authLink);
   }
+
+  const controller = new AbortController();
+  // req 'close' fires as soon as the request body is read, not when the response
+  // finishes — aborting on it kills the LLM call almost immediately on every
+  // request. res 'close' fires when the connection actually ends; writableEnded
+  // distinguishes a normal finish from a real client disconnect.
+  res.on("close", () => { if (!res.writableEnded) controller.abort(); });
 
   const history = session.messages;
   let fullResponse = "";

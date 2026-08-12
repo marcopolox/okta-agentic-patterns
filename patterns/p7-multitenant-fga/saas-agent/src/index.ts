@@ -5,8 +5,6 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { SignJWT, importJWK, importPKCS8 } from "jose";
 import { OpenFgaClient, CredentialsMethod } from "@openfga/sdk";
-import { AsyncLocalStorage } from "node:async_hooks";
-import { randomUUID } from "node:crypto";
 
 const PORT = parseInt(process.env.PORT ?? "3700");
 const EVENT_BUS_URL = process.env.EVENT_BUS_URL ?? "http://localhost:4000";
@@ -88,20 +86,10 @@ const fgaClient = new OpenFgaClient({
   },
 });
 
-// This is a shared demo login, so every visitor authenticates as the same Okta
-// user — without this, concurrent demo sessions would read/write the exact same
-// FGA tuples and overwrite each other's delegated-tool grants. Folding the
-// per-page-mount viewerSessionId into the FGA user id (mirrors console's
-// app/api/p7/delegations/route.ts) gives each browser session its own isolated
-// set of tuples while keeping the same real identity.
-function fgaUserId(email: string, viewerSessionId?: string): string {
-  return viewerSessionId ? `${email}::${viewerSessionId}` : email;
-}
-
-async function checkFgaDelegation(fgaUser: string, toolName: string): Promise<boolean> {
+async function checkFgaDelegation(userEmail: string, toolName: string): Promise<boolean> {
   try {
     const response = await fgaClient.check({
-      user: `user:${fgaUser}`,
+      user: `user:${userEmail}`,
       relation: "delegated",
       object: `tool:${toolName}`,
     });
@@ -126,27 +114,19 @@ function getScopesForTool(toolName: string, availableScopes: string[]): string[]
 
 // ── Event bus ───────────────────────────────────────────────────────────────
 
-// Scopes emitted events to the viewer session that triggered the request currently
-// in flight, so concurrent browsers watching this pattern don't see each other's events.
-const sessionCtx = new AsyncLocalStorage<{ sessionId?: string }>();
-
 async function emitEvent(
   actor: string,
   action: string,
   target: string,
   detail?: string,
   token?: string,
-  level: "info" | "auth" | "token" | "error" | "separator" = "info",
-  callId?: string
+  level: "info" | "auth" | "token" | "error" | "separator" = "info"
 ): Promise<void> {
   try {
     await fetch(`${EVENT_BUS_URL}/emit`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        patternId: PATTERN_ID, actor, action, target, detail, token, level, callId,
-        sessionId: sessionCtx.getStore()?.sessionId,
-      }),
+      body: JSON.stringify({ patternId: PATTERN_ID, actor, action, target, detail, token, level }),
     });
   } catch { /* ignore */ }
 }
@@ -268,7 +248,6 @@ async function getStep2Token(
 interface RequestContext {
   userIdToken: string;
   userEmail: string;
-  viewerSessionId?: string;
   tokenCache: Map<string, string>;
 }
 
@@ -292,9 +271,6 @@ interface ToolDef {
   _server: DiscoveredServer;
 }
 
-// P7 always attaches a real tenant user's token to every tool call, so tools that require
-// no scopes (e.g. Finance's get_fiscal_summary, HR's get_headcount) are filtered out here —
-// calling them would be pointless given the user is already authenticated (same reasoning as P3).
 async function discoverAllTools(_ctx: RequestContext): Promise<{ tools: ToolDef[]; toolMap: Map<string, DiscoveredServer> }> {
   const tools: ToolDef[] = [];
   const toolMap = new Map<string, DiscoveredServer>();
@@ -306,6 +282,9 @@ async function discoverAllTools(_ctx: RequestContext): Promise<{ tools: ToolDef[
       const resp = await fetch(`${server.url}/tools`);
       if (!resp.ok) throw new Error(`Tool discovery failed for ${server.label}: ${resp.status}`);
       const { tools: discovered } = await resp.json() as { tools: Array<{ name: string; description: string; inputSchema?: Record<string, unknown>; requiredScopes?: string[] }> };
+      // P7 always attaches a real tenant user's token to every tool call, so tools that require
+      // no scopes (e.g. Finance's get_fiscal_summary, HR's get_headcount) are filtered out here —
+      // calling them would be pointless given the user is already authenticated (same reasoning as P3).
       const scopedTools = discovered.filter((t) => (t.requiredScopes?.length ?? 0) > 0);
       const skipped = discovered.length - scopedTools.length;
 
@@ -328,19 +307,18 @@ async function callMcpTool(
   toolMap: Map<string, DiscoveredServer>
 ): Promise<string> {
   // FGA check before any tool call
-  const fgaUser = fgaUserId(ctx.userEmail, ctx.viewerSessionId);
   await emitEvent(
     "P7 Agent", "FGA check",
     "Okta FGA",
-    `{ user: "user:${fgaUser}", relation: "delegated", object: "tool:${name}" }`,
+    `{ user: "user:${ctx.userEmail}", relation: "delegated", object: "tool:${name}" }`,
     undefined, "auth"
   );
-  const allowed = await checkFgaDelegation(fgaUser, name);
+  const allowed = await checkFgaDelegation(ctx.userEmail, name);
   if (!allowed) {
     await emitEvent(
       "Okta FGA", "check result → denied",
       "P7 Agent",
-      `{ allowed: false } — user:${fgaUser} has not delegated tool:${name}`,
+      `{ allowed: false } — user:${ctx.userEmail} has not delegated tool:${name}`,
       undefined, "auth"
     );
     return `You haven't delegated '${name}' to me. Toggle it on in the delegation panel to allow this action.`;
@@ -348,7 +326,7 @@ async function callMcpTool(
   await emitEvent(
     "Okta FGA", "check result → allowed",
     "P7 Agent",
-    `{ allowed: true } — user:${fgaUser} → delegated → tool:${name}`,
+    `{ allowed: true } — user:${ctx.userEmail} → delegated → tool:${name}`,
     undefined, "auth"
   );
 
@@ -356,7 +334,6 @@ async function callMcpTool(
   if (!server) throw new Error(`No server found for tool: ${name}`);
 
   const scopes = getScopesForTool(name, server.scopes);
-  const callId = randomUUID().slice(0, 8);
   let token: string;
   try {
     token = await getTokenForServer(server, scopes, ctx);
@@ -367,19 +344,13 @@ async function callMcpTool(
     return `Access to "${name}" was blocked by Okta policy. Error: ${msg}`;
   }
 
-  const viewerSessionId = sessionCtx.getStore()?.sessionId;
   const transport = new StreamableHTTPClientTransport(new URL(`${server.url}/mcp`), {
-    requestInit: { headers: {
-      Authorization: `Bearer ${token}`,
-      "X-Pattern-Id": PATTERN_ID,
-      ...(viewerSessionId ? { "X-Session-Id": viewerSessionId } : {}),
-      "X-Call-Id": callId,
-    } },
+    requestInit: { headers: { Authorization: `Bearer ${token}` } },
   });
   const client = new Client({ name: "p7-agent", version: "1.0.0" }, { capabilities: {} });
   await client.connect(transport);
 
-  await emitEvent("P7 Agent", `tools/call ${name}`, server.label, JSON.stringify(args).slice(0, 120), undefined, "info", callId);
+  await emitEvent("P7 Agent", `tools/call ${name}`, server.label, JSON.stringify(args).slice(0, 120), undefined, "info");
   const result = await client.callTool({ name, arguments: args });
   await client.close();
 
@@ -465,6 +436,7 @@ async function runAgentLoop(
           toolResults.push({ type: "tool_result", tool_use_id: block.id, content: result });
         }
         (messages as Anthropic.MessageParam[]).push({ role: "user", content: toolResults });
+        await emitEvent("P7 Agent", "tool results ready", "LLM", "Data received from all the tools. Sent to LLM for processing.", undefined, "info");
       }
     }
   } else if (openai) {
@@ -513,6 +485,7 @@ async function runAgentLoop(
           const result = await callMcpTool(tc.function.name, args, ctx, toolMap);
           (messages as OpenAI.ChatCompletionMessageParam[]).push({ role: "tool", tool_call_id: tc.id, content: result });
         }
+        await emitEvent("P7 Agent", "tool results ready", "LLM", "Data received from all the tools. Sent to LLM for processing.", undefined, "info");
       }
     }
   } else {
@@ -556,8 +529,7 @@ app.get("/status", (_req, res) => {
 const seenTokenSessions = new Set<string>();
 
 app.post("/chat", async (req: Request, res: Response): Promise<void> => {
-  const { message, session_id, viewer_session_id } = req.body as { message: string; session_id?: string; viewer_session_id?: string };
-  sessionCtx.enterWith({ sessionId: viewer_session_id });
+  const { message, session_id } = req.body as { message: string; session_id?: string };
   const authHeader = req.headers.authorization;
 
   if (!authHeader?.startsWith("Bearer ")) {
@@ -585,7 +557,6 @@ app.post("/chat", async (req: Request, res: Response): Promise<void> => {
   const ctx: RequestContext = {
     userIdToken,
     userEmail,
-    viewerSessionId: viewer_session_id,
     tokenCache: new Map(),
   };
 

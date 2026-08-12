@@ -4,7 +4,6 @@ import OpenAI from "openai";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { SignJWT, importJWK, importPKCS8 } from "jose";
-import { AsyncLocalStorage } from "node:async_hooks";
 
 const PORT = parseInt(process.env.PORT ?? "3500");
 const EVENT_BUS_URL = process.env.EVENT_BUS_URL ?? "http://localhost:4000";
@@ -25,19 +24,12 @@ class CibaDeniedError extends Error {
   constructor() { super("CIBA denied by user"); }
 }
 
-// Scopes emitted events to the viewer session that triggered the request currently
-// in flight, so concurrent browsers watching this pattern don't see each other's events.
-const sessionCtx = new AsyncLocalStorage<{ sessionId?: string }>();
-
 async function emitEvent(actor: string, action: string, target: string, detail?: string, tokenSnippet?: string, level = "auth", token?: string) {
   try {
     await fetch(`${EVENT_BUS_URL}/emit`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        patternId: PATTERN_ID, actor, action, target, detail, tokenSnippet, level, token,
-        sessionId: sessionCtx.getStore()?.sessionId,
-      }),
+      body: JSON.stringify({ patternId: PATTERN_ID, actor, action, target, detail, tokenSnippet, level, token }),
     });
   } catch {
     // Non-fatal
@@ -244,8 +236,6 @@ async function callInventoryTool(name: string, args: Record<string, unknown>, to
 
   const headers: Record<string, string> = { "X-Pattern-Id": PATTERN_ID };
   if (token) headers["Authorization"] = `Bearer ${token}`;
-  const viewerSessionId = sessionCtx.getStore()?.sessionId;
-  if (viewerSessionId) headers["X-Session-Id"] = viewerSessionId;
 
   const transport = new StreamableHTTPClientTransport(
     new URL(`${INVENTORY_API_URL}/mcp`),
@@ -380,6 +370,8 @@ async function* runAnthropic(
       }
     }
 
+    await emitEvent("P5 Agent", "tool results ready", "LLM", "Data received from all the tools. Sent to LLM for processing.", undefined, "info");
+
     msgs = [
       ...msgs,
       { role: "assistant", content: response.content },
@@ -455,6 +447,8 @@ async function* runOpenAI(
       }
     }
 
+    await emitEvent("P5 Agent", "tool results ready", "LLM", "Data received from all the tools. Sent to LLM for processing.", undefined, "info");
+
     msgs = [...msgs, choice.message, ...toolResults];
   }
 }
@@ -476,13 +470,12 @@ app.get("/health", (_req, res) => {
 });
 
 app.post("/chat", async (req, res) => {
-  const { message, session_id, viewer_session_id } = req.body as { message: string; session_id?: string; viewer_session_id?: string };
+  const { message, session_id } = req.body as { message: string; session_id?: string };
 
   if (!message) {
     res.status(400).json({ error: "message required" });
     return;
   }
-  sessionCtx.enterWith({ sessionId: viewer_session_id });
 
   const llmOverrides: LLMOverrides = {
     anthropicKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] !== "openai"

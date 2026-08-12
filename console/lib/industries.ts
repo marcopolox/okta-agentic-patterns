@@ -67,6 +67,7 @@ export const INDUSTRIES: DemoIndustry[] = [
             "Show the org chart and the Finance budget for the Engineering team",
           ],
         },
+        /*
         {
           label: "GitHub",
           prompts: [
@@ -83,6 +84,7 @@ export const INDUSTRIES: DemoIndustry[] = [
             "Share the department budget overview on Slack",
           ],
         },
+        */
       ],
       p4: [
         {
@@ -140,6 +142,7 @@ export const INDUSTRIES: DemoIndustry[] = [
             "Show the clinical org chart and departmental spend",
           ],
         },
+        /*
         {
           label: "GitHub",
           prompts: [
@@ -156,6 +159,7 @@ export const INDUSTRIES: DemoIndustry[] = [
             "Share the Emergency department budget on Slack",
           ],
         },
+        */
       ],
       p4: [
         {
@@ -213,6 +217,7 @@ export const INDUSTRIES: DemoIndustry[] = [
             "Show the org chart and the marketing budget",
           ],
         },
+        /*
         {
           label: "GitHub",
           prompts: [
@@ -229,6 +234,7 @@ export const INDUSTRIES: DemoIndustry[] = [
             "Share the payroll budget overview on Slack",
           ],
         },
+        */
       ],
       p4: [
         {
@@ -286,6 +292,7 @@ export const INDUSTRIES: DemoIndustry[] = [
             "Show the plant org chart and the R&D budget",
           ],
         },
+        /*
         {
           label: "GitHub",
           prompts: [
@@ -302,6 +309,7 @@ export const INDUSTRIES: DemoIndustry[] = [
             "Share the R&D budget on Slack",
           ],
         },
+        */
       ],
       p4: [
         {
@@ -359,6 +367,7 @@ export const INDUSTRIES: DemoIndustry[] = [
             "Show the agency org chart and District 1 budget",
           ],
         },
+        /*
         {
           label: "GitHub",
           prompts: [
@@ -375,6 +384,7 @@ export const INDUSTRIES: DemoIndustry[] = [
             "Share the IT infrastructure budget on Slack",
           ],
         },
+        */
       ],
       p4: [
         {
@@ -432,6 +442,7 @@ export const INDUSTRIES: DemoIndustry[] = [
             "Show the academic org chart and Graduate Programs budget",
           ],
         },
+        /*
         {
           label: "GitHub",
           prompts: [
@@ -448,6 +459,7 @@ export const INDUSTRIES: DemoIndustry[] = [
             "Share the research grants budget on Slack",
           ],
         },
+        */
       ],
       p4: [
         {

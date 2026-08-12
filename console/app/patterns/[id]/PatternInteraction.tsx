@@ -41,6 +41,21 @@ function generateViewerSessionId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+// Persisted in sessionStorage (not just an in-memory ref) so it survives the full-page
+// reload of an OAuth redirect — the login start/callback routes stash it in a cookie
+// across that redirect so server-emitted events (e.g. "issued id_token") can be
+// attributed to this exact tab's session instead of falling back to the event-bus's
+// shared/session-less bucket.
+function getOrCreateViewerSessionId(patternId: string): string {
+  if (typeof sessionStorage === "undefined") return generateViewerSessionId();
+  const key = `${patternId}_viewer_session_id`;
+  const existing = sessionStorage.getItem(key);
+  if (existing) return existing;
+  const id = generateViewerSessionId();
+  sessionStorage.setItem(key, id);
+  return id;
+}
+
 type AgentServer = { label: string; connectionType?: string; active?: boolean };
 
 function buildPresetGroups(
@@ -93,6 +108,7 @@ function buildPresetGroups(
       });
     }
 
+    /*
     if (hasGitHub) {
       groups.push({
         label: "GitHub",
@@ -114,6 +130,7 @@ function buildPresetGroups(
         ],
       });
     }
+    */
 
     // Generic fallback for any other discovered resource not explicitly handled above
     const knownLabels = ["hr", "finance", "slack", "github"];
@@ -543,7 +560,7 @@ export function PatternInteraction({ pattern, active, userToken, themeOverrides,
   // chat/mission activity stay scoped to it — never shared with another viewer
   // running the same pattern concurrently.
   const viewerSessionIdRef = useRef<string>("");
-  if (!viewerSessionIdRef.current) viewerSessionIdRef.current = generateViewerSessionId();
+  if (!viewerSessionIdRef.current) viewerSessionIdRef.current = getOrCreateViewerSessionId(pattern.id);
   const viewerSessionId = viewerSessionIdRef.current;
 
   async function handleRefresh() {
@@ -567,7 +584,22 @@ export function PatternInteraction({ pattern, active, userToken, themeOverrides,
     if (res.ok) setTokenRevoked(true);
   }
 
+  async function handleMissionSelect(id: string | null) {
+    if (id !== null && id !== selectedMissionId) {
+      setEvents([]);
+      setMcpResetKey((k) => k + 1);
+      await fetch(`/api/events/${pattern.id}?sessionId=${encodeURIComponent(viewerSessionId)}`, { method: "DELETE" }).catch(() => {});
+    }
+    setSelectedMissionId(id);
+  }
+
   useEffect(() => {
+    // Patterns gated behind login must not reveal event history (including session-less
+    // events like an agent restart) to a viewer who isn't authenticated yet.
+    if (pattern.requiresUserToken && !userToken) {
+      setEvents([]);
+      return;
+    }
     const unsubscribe = subscribeToEvents(
       pattern.id,
       viewerSessionId,
@@ -575,7 +607,7 @@ export function PatternInteraction({ pattern, active, userToken, themeOverrides,
       () => setEvents([]),
     );
     return unsubscribe;
-  }, [pattern.id, viewerSessionId]);
+  }, [pattern.id, viewerSessionId, pattern.requiresUserToken, userToken]);
 
   // Close modal / popover on Escape
   useEffect(() => {
@@ -717,7 +749,7 @@ export function PatternInteraction({ pattern, active, userToken, themeOverrides,
             </div>
           )}
           {pattern.rightPanel === "chat" && pattern.requiresUserToken && !userToken && (!pattern.requiresAdapter || adapterConfigured) && (
-            <UserLoginGate pattern={pattern} active={active} />
+            <UserLoginGate pattern={pattern} active={active} viewerSessionId={viewerSessionId} />
           )}
           {pattern.rightPanel === "chat" && (!pattern.requiresUserToken || userToken) && (!pattern.requiresAdapter || adapterConfigured) && (
             agentLoadState === "loading" ? (
@@ -785,7 +817,7 @@ export function PatternInteraction({ pattern, active, userToken, themeOverrides,
             )
           )}
           {pattern.rightPanel === "mission" && pattern.requiresUserToken && !userToken && (
-            <UserLoginGate pattern={pattern} active={active} />
+            <UserLoginGate pattern={pattern} active={active} viewerSessionId={viewerSessionId} />
           )}
           {pattern.rightPanel === "mission" && (!pattern.requiresUserToken || userToken) && (
             <div className="flex min-h-0 flex-1 flex-col gap-2">
@@ -805,7 +837,6 @@ export function PatternInteraction({ pattern, active, userToken, themeOverrides,
                 </div>
               )}
               <MissionPanel
-                agentUrl={pattern.agentUrl ?? ""}
                 patternId={pattern.id}
                 viewerSessionId={viewerSessionId}
                 disabled={!active}
@@ -813,7 +844,7 @@ export function PatternInteraction({ pattern, active, userToken, themeOverrides,
                 missions={MISSIONS[pattern.id] ?? []}
                 userToken={userToken ?? undefined}
                 selectedMissionId={selectedMissionId}
-                onMissionSelect={setSelectedMissionId}
+                onMissionSelect={handleMissionSelect}
                 onRunStateChange={(cancel) => { activeAbortRef.current = cancel; }}
                 resourcesSlot={
                   selectedMissionId && (pattern.mcpServers?.length || agentLoadServers.length > 0) ? (
@@ -839,7 +870,7 @@ export function PatternInteraction({ pattern, active, userToken, themeOverrides,
             <PkceChatPanel pattern={pattern} active={active} viewerSessionId={viewerSessionId} />
           )}
           {pattern.rightPanel === "delegation" && pattern.requiresUserToken && !userToken && (
-            <UserLoginGate pattern={pattern} active={active} />
+            <UserLoginGate pattern={pattern} active={active} viewerSessionId={viewerSessionId} />
           )}
           {pattern.rightPanel === "delegation" && (!pattern.requiresUserToken || userToken) && (
             <div className="flex min-h-0 flex-1 flex-col gap-2">
@@ -1081,9 +1112,9 @@ function AgentLoadingScreen({ message }: { message: string }) {
   );
 }
 
-function UserLoginGate({ pattern, active }: { pattern: Pattern; active: boolean }) {
+function UserLoginGate({ pattern, active, viewerSessionId }: { pattern: Pattern; active: boolean; viewerSessionId: string }) {
   function login() {
-    window.location.href = `/api/auth/start/${pattern.id}`;
+    window.location.href = `/api/auth/start/${pattern.id}?viewer_session_id=${encodeURIComponent(viewerSessionId)}`;
   }
 
   if (!active) {

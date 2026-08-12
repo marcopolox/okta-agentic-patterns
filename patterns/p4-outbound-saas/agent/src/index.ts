@@ -3,7 +3,6 @@ import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { SignJWT, importJWK } from "jose";
 import { randomUUID } from "crypto";
-import { AsyncLocalStorage } from "node:async_hooks";
 
 const PORT = parseInt(process.env.PORT ?? "3400");
 const EVENT_BUS_URL = process.env.EVENT_BUS_URL ?? "http://localhost:4000";
@@ -14,19 +13,12 @@ const GITHUB_STS_RESOURCE = process.env.GITHUB_STS_RESOURCE ?? "";
 const SLACK_STS_RESOURCE = process.env.SLACK_STS_RESOURCE ?? "";
 const PATTERN_ID = "p4";
 
-// Scopes emitted events to the viewer session that triggered the request currently
-// in flight, so concurrent browsers watching this pattern don't see each other's events.
-const sessionCtx = new AsyncLocalStorage<{ sessionId?: string }>();
-
 async function emitEvent(actor: string, action: string, target: string, detail?: string, tokenSnippet?: string, level = "auth", token?: string) {
   try {
     await fetch(`${EVENT_BUS_URL}/emit`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        patternId: PATTERN_ID, actor, action, target, detail, tokenSnippet, level, token,
-        sessionId: sessionCtx.getStore()?.sessionId,
-      }),
+      body: JSON.stringify({ patternId: PATTERN_ID, actor, action, target, detail, tokenSnippet, level, token }),
     });
   } catch {
     // Non-fatal
@@ -384,6 +376,8 @@ async function* runAnthropic(
       toolResults.push({ type: "tool_result", tool_use_id: tool.id, content: result });
     }
 
+    await emitEvent("P4 Agent", "tool results ready", "LLM", "Data received from all the tools. Sent to LLM for processing.", undefined, "info");
+
     msgs = [
       ...msgs,
       { role: "assistant", content: response.content },
@@ -429,6 +423,8 @@ async function* runOpenAI(
       const result = await callTool(tc.function.name, args);
       toolResults.push({ role: "tool", tool_call_id: tc.id, content: result });
     }
+
+    await emitEvent("P4 Agent", "tool results ready", "LLM", "Data received from all the tools. Sent to LLM for processing.", undefined, "info");
 
     msgs = [...msgs, choice.message, ...toolResults];
   }
@@ -495,13 +491,12 @@ app.post("/revoke", async (req, res) => {
 
 
 app.post("/chat", async (req, res) => {
-  const { message, session_id, viewer_session_id } = req.body as { message: string; session_id?: string; viewer_session_id?: string };
+  const { message, session_id } = req.body as { message: string; session_id?: string };
 
   if (!message) {
     res.status(400).json({ error: "message required" });
     return;
   }
-  sessionCtx.enterWith({ sessionId: viewer_session_id });
 
   const llmOverrides: LLMOverrides = {
     anthropicKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] !== "openai"

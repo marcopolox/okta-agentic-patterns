@@ -83,6 +83,7 @@ export async function GET(req: NextRequest) {
     ].filter(Boolean).join(" | ");
 
     const eventBusUrl = process.env.EVENT_BUS_URL ?? "http://event-bus:4000";
+    const viewerSessionId = req.cookies.get("p4_viewer_session")?.value;
     await fetch(`${eventBusUrl}/emit`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -95,8 +96,10 @@ export async function GET(req: NextRequest) {
         tokenSnippet: snippet,
         level: "token",
         token: idToken,
+        sessionId: viewerSessionId,
       }),
     }).catch(() => {});
+    response.cookies.delete("p4_viewer_session");
   }
 
   return response;
