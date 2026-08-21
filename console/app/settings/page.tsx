@@ -140,7 +140,7 @@ export default function SettingsPage() {
 
           {/* Provider toggle */}
           <div className="mb-4 flex gap-2">
-            {(["anthropic", "openai"] as const).map((p) => (
+            {(["anthropic", "openai", "litellm"] as const).map((p) => (
               <button
                 key={p}
                 disabled={!credsLoaded}
@@ -151,43 +151,101 @@ export default function SettingsPage() {
                     : "border-white/10 text-slate-400 hover:text-white"
                 }`}
               >
-                {p === "anthropic" ? "Anthropic" : "OpenAI"}
+                {p === "anthropic" ? "Anthropic" : p === "openai" ? "OpenAI" : "LiteLLM"}
               </button>
             ))}
           </div>
 
-          {/* API key input */}
-          <div className="mb-3">
-            <label className="mb-1.5 block text-xs font-medium text-slate-400">
-              {creds.provider === "anthropic" ? "Anthropic API Key" : "OpenAI API Key"}
-            </label>
-            <div className="flex gap-2">
-              <input
-                type={showKey ? "text" : "password"}
-                disabled={!credsLoaded}
-                placeholder={creds.provider === "anthropic" ? "sk-ant-…" : "sk-…"}
-                value={creds.provider === "anthropic" ? creds.anthropicKey : creds.openaiKey}
-                onChange={(e) =>
-                  setCreds({
-                    ...creds,
-                    ...(creds.provider === "anthropic"
-                      ? { anthropicKey: e.target.value }
-                      : { openaiKey: e.target.value }),
-                  })
-                }
-                className={inputCls}
-                autoComplete="off"
-                spellCheck={false}
-              />
-              <button
-                onClick={() => setShowKey((v) => !v)}
-                className="rounded-lg border border-white/10 p-2 text-slate-400 hover:text-white transition-colors"
-                title={showKey ? "Hide key" : "Show key"}
-              >
-                {showKey ? <EyeOff size={14} /> : <Eye size={14} />}
-              </button>
+          {creds.provider === "litellm" ? (
+            <>
+              {/* LiteLLM base URL */}
+              <div className="mb-3">
+                <label className="mb-1.5 block text-xs font-medium text-slate-400">LiteLLM Base URL</label>
+                <input
+                  type="text"
+                  disabled={!credsLoaded}
+                  placeholder="https://your-litellm-proxy.example.com"
+                  value={creds.litellmBaseUrl}
+                  onChange={(e) => setCreds({ ...creds, litellmBaseUrl: e.target.value })}
+                  className={inputCls}
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+              </div>
+
+              {/* LiteLLM API key */}
+              <div className="mb-3">
+                <label className="mb-1.5 block text-xs font-medium text-slate-400">LiteLLM API Key</label>
+                <div className="flex gap-2">
+                  <input
+                    type={showKey ? "text" : "password"}
+                    disabled={!credsLoaded}
+                    placeholder="sk-…"
+                    value={creds.litellmKey}
+                    onChange={(e) => setCreds({ ...creds, litellmKey: e.target.value })}
+                    className={inputCls}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                  <button
+                    onClick={() => setShowKey((v) => !v)}
+                    className="rounded-lg border border-white/10 p-2 text-slate-400 hover:text-white transition-colors"
+                    title={showKey ? "Hide key" : "Show key"}
+                  >
+                    {showKey ? <EyeOff size={14} /> : <Eye size={14} />}
+                  </button>
+                </div>
+              </div>
+
+              {/* LiteLLM model (optional) */}
+              <div className="mb-3">
+                <label className="mb-1.5 block text-xs font-medium text-slate-400">Model / Alias (optional — let LiteLLM decide if left blank)</label>
+                <input
+                  type="text"
+                  disabled={!credsLoaded}
+                  placeholder="e.g. gpt-4o, claude-opus-4-7, or a LiteLLM router alias"
+                  value={creds.litellmModel}
+                  onChange={(e) => setCreds({ ...creds, litellmModel: e.target.value })}
+                  className={inputCls}
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+              </div>
+            </>
+          ) : (
+            /* API key input */
+            <div className="mb-3">
+              <label className="mb-1.5 block text-xs font-medium text-slate-400">
+                {creds.provider === "anthropic" ? "Anthropic API Key" : "OpenAI API Key"}
+              </label>
+              <div className="flex gap-2">
+                <input
+                  type={showKey ? "text" : "password"}
+                  disabled={!credsLoaded}
+                  placeholder={creds.provider === "anthropic" ? "sk-ant-…" : "sk-…"}
+                  value={creds.provider === "anthropic" ? creds.anthropicKey : creds.openaiKey}
+                  onChange={(e) =>
+                    setCreds({
+                      ...creds,
+                      ...(creds.provider === "anthropic"
+                        ? { anthropicKey: e.target.value }
+                        : { openaiKey: e.target.value }),
+                    })
+                  }
+                  className={inputCls}
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                <button
+                  onClick={() => setShowKey((v) => !v)}
+                  className="rounded-lg border border-white/10 p-2 text-slate-400 hover:text-white transition-colors"
+                  title={showKey ? "Hide key" : "Show key"}
+                >
+                  {showKey ? <EyeOff size={14} /> : <Eye size={14} />}
+                </button>
+              </div>
             </div>
-          </div>
+          )}
 
           {/* Slack token + channel */}
           <div className="mb-3">

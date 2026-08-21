@@ -514,9 +514,18 @@ async function callMcpTool(name: string, args: Record<string, unknown>, ctx: Req
 
   await emitEvent("P3 Agent", "calling tool", label, `tool=${name} scopes=${scopes.join(",")}`, undefined, "info");
 
+  const sessionId = requestContext.getStore()?.sessionId;
   const transport = new StreamableHTTPClientTransport(
     new URL(`${server.url}/mcp`),
-    { requestInit: { headers: { Authorization: `Bearer ${token}`, "X-Pattern-Id": PATTERN_ID } } }
+    {
+      requestInit: {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "X-Pattern-Id": PATTERN_ID,
+          ...(sessionId ? { "X-Session-Id": sessionId } : {}),
+        },
+      },
+    }
   );
   const client = new Client({ name: "p3-agent", version: "1.0.0" });
   await client.connect(transport);
@@ -546,7 +555,7 @@ function decodeJwtPayload(token: string): Record<string, unknown> {
   }
 }
 
-interface LLMOverrides { anthropicKey?: string; openaiKey?: string; }
+interface LLMOverrides { anthropicKey?: string; openaiKey?: string; litellmKey?: string; litellmBaseUrl?: string; litellmModel?: string; }
 
 type ToolExecutor = (name: string, args: Record<string, unknown>) => Promise<string>;
 
@@ -566,7 +575,9 @@ async function* runAgentLoop(
   const slackNote = SLACK_STS_RESOURCE ? " When slack tools are available, you can use them to post summaries or reports to Slack channels." : "";
   const system = `${greetInstruction}You are a helpful internal assistant acting on behalf of ${userName}. Use the available tools to answer questions about employees, departments, budgets, and finances.${slackNote}${restrictionNote} Be concise and informative. When presenting lists of employees or departments, format them as readable markdown tables or structured lists with clear headings — never dump raw JSON.`;
 
-  if (overrides?.anthropicKey || process.env.ANTHROPIC_API_KEY) {
+  if (overrides?.litellmKey && overrides?.litellmBaseUrl) {
+    yield* runOpenAI(messages, system, callTool, tools, overrides, signal);
+  } else if (overrides?.anthropicKey || process.env.ANTHROPIC_API_KEY) {
     yield* runAnthropic(messages, system, callTool, tools, overrides, signal);
   } else if (overrides?.openaiKey || process.env.OPENAI_API_KEY) {
     yield* runOpenAI(messages, system, callTool, tools, overrides, signal);
@@ -632,7 +643,9 @@ async function* runOpenAI(
   overrides?: LLMOverrides,
   signal?: AbortSignal
 ): AsyncGenerator<string> {
-  const openai = new OpenAI({ ...(overrides?.openaiKey && { apiKey: overrides.openaiKey }) });
+  const openai = overrides?.litellmKey && overrides?.litellmBaseUrl
+    ? new OpenAI({ apiKey: overrides.litellmKey, baseURL: overrides.litellmBaseUrl })
+    : new OpenAI({ ...(overrides?.openaiKey && { apiKey: overrides.openaiKey }) });
   const openaiTools: OpenAI.ChatCompletionTool[] = tools.map((t) => ({
     type: "function" as const,
     function: { name: t.name, description: t.description, parameters: t.inputSchema },
@@ -646,7 +659,7 @@ async function* runOpenAI(
   while (true) {
     if (signal?.aborted) return;
     const response = await openai.chat.completions.create({
-      model: process.env.OPENAI_MODEL ?? "gpt-4o",
+      model: overrides?.litellmModel || process.env.OPENAI_MODEL || "gpt-4o",
       messages: msgs,
       tools: openaiTools,
     });
@@ -674,7 +687,7 @@ const app = express();
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-LLM-Api-Key, X-LLM-Provider, X-Slack-Token, X-Slack-Channel");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-LLM-Api-Key, X-LLM-Provider, X-LLM-Base-Url, X-LLM-Model, X-Slack-Token, X-Slack-Channel");
   if (req.method === "OPTIONS") { res.sendStatus(200); return; }
   next();
 });
@@ -727,10 +740,14 @@ app.post("/chat", async (req, res) => {
 async function handleChat(req: express.Request, res: express.Response, message: string, session_id?: string) {
 
   const llmOverrides: LLMOverrides = {
-    anthropicKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] !== "openai"
+    anthropicKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] !== "openai" && req.headers["x-llm-provider"] !== "litellm"
       ? String(req.headers["x-llm-api-key"]) : undefined,
     openaiKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] === "openai"
       ? String(req.headers["x-llm-api-key"]) : undefined,
+    litellmKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] === "litellm"
+      ? String(req.headers["x-llm-api-key"]) : undefined,
+    litellmBaseUrl: req.headers["x-llm-base-url"] ? String(req.headers["x-llm-base-url"]) : undefined,
+    litellmModel: req.headers["x-llm-model"] ? String(req.headers["x-llm-model"]) : undefined,
   };
 
   const authHeader = req.headers.authorization;

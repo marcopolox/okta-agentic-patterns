@@ -53,8 +53,10 @@ export function DelegationPanel({ userToken, compact, viewerSessionId }: Props) 
   async function toggleTool(tool: string, currentValue: boolean) {
     if (pending.has(tool)) return;
     setPending((p) => new Set(p).add(tool));
-    // Optimistic update
-    setDelegations((prev) => ({ ...prev, [tool]: !currentValue }));
+    // Not optimistic on purpose: the agent's FGA check reflects the real tuple state, so
+    // flipping the switch before the write/delete actually lands lets the user act (e.g.
+    // send a prompt) against a permission that hasn't actually changed on the server yet.
+    // The button stays disabled with a spinner (via `pending`) until this resolves.
 
     try {
       const method = currentValue ? "DELETE" : "POST";
@@ -66,12 +68,13 @@ export function DelegationPanel({ userToken, compact, viewerSessionId }: Props) 
         },
         body: JSON.stringify({ tool, viewer_session_id: viewerSessionId }),
       });
-      if (!res.ok) {
-        // Revert on failure
-        setDelegations((prev) => ({ ...prev, [tool]: currentValue }));
+      if (res.ok) {
+        setDelegations((prev) => ({ ...prev, [tool]: !currentValue }));
+      } else {
+        setError(`${res.status}: ${res.statusText}`);
       }
-    } catch {
-      setDelegations((prev) => ({ ...prev, [tool]: currentValue }));
+    } catch (err) {
+      setError(String(err));
     } finally {
       setPending((p) => { const next = new Set(p); next.delete(tool); return next; });
     }

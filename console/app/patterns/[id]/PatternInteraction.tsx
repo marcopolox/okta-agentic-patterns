@@ -30,6 +30,12 @@ const PRESET_PROMPTS: Partial<Record<PatternId, string[]>> = {
     "The 4K webcam is out of stock — restock it with 100 units",
     "Add 50 units to the Portable SSD inventory",
   ],
+  p7: [
+    "List all employees in the Engineering department",
+    "What's Alice Chen's job title and who's her manager?",
+    "What's the Engineering budget and how much has been spent so far?",
+    "Show me the status of invoice INV-1003 from Salesforce",
+  ],
 };
 
 // crypto.randomUUID() requires a secure context (HTTPS or localhost) — this demo
@@ -54,6 +60,22 @@ function getOrCreateViewerSessionId(patternId: string): string {
   const id = generateViewerSessionId();
   sessionStorage.setItem(key, id);
   return id;
+}
+
+// Every pattern gets its own viewer-session ID (keyed "<patternId>_viewer_session_id"), but
+// they all live in the same tab's sessionStorage — so a "clear everything for this session"
+// action can find every pattern this tab has touched by scanning for that key suffix.
+function getAllViewerSessions(): Array<{ patternId: string; sessionId: string }> {
+  if (typeof sessionStorage === "undefined") return [];
+  const sessions: Array<{ patternId: string; sessionId: string }> = [];
+  for (let i = 0; i < sessionStorage.length; i++) {
+    const key = sessionStorage.key(i);
+    if (!key?.endsWith("_viewer_session_id")) continue;
+    const sessionId = sessionStorage.getItem(key);
+    if (!sessionId) continue;
+    sessions.push({ patternId: key.slice(0, -"_viewer_session_id".length), sessionId });
+  }
+  return sessions;
 }
 
 type AgentServer = { label: string; connectionType?: string; active?: boolean };
@@ -548,7 +570,7 @@ export function PatternInteraction({ pattern, active, userToken, themeOverrides,
   const [agentLoadMessage, setAgentLoadMessage] = useState<string>(
     pattern.hasAgentStatus ? "Fetching connections from Okta..." : ""
   );
-  const [agentLoadServers, setAgentLoadServers] = useState<{ label: string; audience?: string; connectionType?: string; active?: boolean }[]>([]);
+  const [agentLoadServers, setAgentLoadServers] = useState<{ label: string; audience?: string; issuerUrl?: string; connectionType?: string; active?: boolean }[]>([]);
   const displayServers = (pattern.mcpServers ?? []).map((s) => ({
     ...s,
     name: themeOverrides?.serverNameOverrides?.[s.actor] ?? s.name,
@@ -562,6 +584,14 @@ export function PatternInteraction({ pattern, active, userToken, themeOverrides,
   const viewerSessionIdRef = useRef<string>("");
   if (!viewerSessionIdRef.current) viewerSessionIdRef.current = getOrCreateViewerSessionId(pattern.id);
   const viewerSessionId = viewerSessionIdRef.current;
+
+  async function handleLogoutClick(e: React.MouseEvent<HTMLAnchorElement>, patternId: string) {
+    e.preventDefault();
+    activeAbortRef.current?.();
+    setEvents([]);
+    await fetch(`/api/events/${patternId}?sessionId=${encodeURIComponent(viewerSessionId)}`, { method: "DELETE" }).catch(() => {});
+    window.location.href = `/api/auth/logout/${patternId}`;
+  }
 
   async function handleRefresh() {
     setRefreshing(true);
@@ -787,7 +817,7 @@ export function PatternInteraction({ pattern, active, userToken, themeOverrides,
                           )}
                           <a
                             href={`/api/auth/logout/${pattern.id}`}
-                            onClick={() => activeAbortRef.current?.()}
+                            onClick={(e) => handleLogoutClick(e, pattern.id)}
                             className="flex items-center gap-1 text-xs text-slate-500 hover:text-slate-300"
                           >
                             <LogOut size={11} />
@@ -828,7 +858,7 @@ export function PatternInteraction({ pattern, active, userToken, themeOverrides,
                   </span>
                   <a
                     href={`/api/auth/logout/${pattern.id}`}
-                    onClick={() => activeAbortRef.current?.()}
+                    onClick={(e) => handleLogoutClick(e, pattern.id)}
                     className="flex items-center gap-1 text-xs text-slate-500 hover:text-slate-300"
                   >
                     <LogOut size={11} />
@@ -897,7 +927,7 @@ export function PatternInteraction({ pattern, active, userToken, themeOverrides,
                         </div>
                         <a
                           href="/api/auth/logout/p7"
-                          onClick={() => activeAbortRef.current?.()}
+                          onClick={(e) => handleLogoutClick(e, "p7")}
                           className="text-[10px] text-slate-500 hover:text-slate-300 transition-colors"
                         >
                           Log out
@@ -966,7 +996,18 @@ export function PatternInteraction({ pattern, active, userToken, themeOverrides,
               onClear={async () => {
                 activeAbortRef.current?.();
                 setEvents([]);
-                await fetch(`/api/events/${pattern.id}?sessionId=${encodeURIComponent(viewerSessionId)}`, { method: "DELETE" });
+                // Global-per-session clear: wipe every pattern's event buffer this tab has
+                // ever touched, not just the current one — matches this tab's viewerSessionId
+                // for each pattern (each pattern keeps its own session id, see getAllViewerSessions).
+                const sessions = getAllViewerSessions();
+                if (!sessions.some((s) => s.patternId === pattern.id)) {
+                  sessions.push({ patternId: pattern.id, sessionId: viewerSessionId });
+                }
+                await Promise.all(
+                  sessions.map(({ patternId, sessionId }) =>
+                    fetch(`/api/events/${patternId}?sessionId=${encodeURIComponent(sessionId)}`, { method: "DELETE" }).catch(() => {})
+                  )
+                );
               }}
             />
           </div>
@@ -1003,7 +1044,7 @@ export function PatternInteraction({ pattern, active, userToken, themeOverrides,
                             : "text-slate-500 hover:text-slate-300"
                         }`}
                       >
-                        Mission {m}
+                        Use Case {m}
                       </button>
                     ))}
                   </div>
@@ -1020,7 +1061,7 @@ export function PatternInteraction({ pattern, active, userToken, themeOverrides,
             {/* Modal content */}
             <div className="min-h-0 flex-1 overflow-auto p-6">
               {openDiagram === "architecture" && (
-                <div className="flex h-full min-h-[75vh] flex-col gap-4">
+                <div className="flex min-h-[60vh] flex-col gap-4">
                   <FlowDiagram patternId={pattern.id} animate={active} fill mission={pattern.id === "p6" ? diagramMission : undefined} />
                   {pattern.id === "p1" && (
                     <div className="rounded-xl border border-cyan-500/20 bg-gray-800/60 px-5 py-4 text-sm text-slate-300 space-y-2">

@@ -81,6 +81,8 @@ export async function POST(req: NextRequest) {
 
   const llmApiKey = req.headers.get("x-llm-api-key");
   const llmProvider = req.headers.get("x-llm-provider");
+  const llmBaseUrl = req.headers.get("x-llm-base-url");
+  const llmModel = req.headers.get("x-llm-model");
   const slackToken = req.headers.get("x-slack-token");
   const slackChannel = req.headers.get("x-slack-channel");
 
@@ -91,6 +93,8 @@ export async function POST(req: NextRequest) {
       "Content-Type": "application/json",
       Authorization: `Bearer ${access_token}`,
       ...(llmApiKey ? { "X-LLM-Api-Key": llmApiKey, "X-LLM-Provider": llmProvider ?? "anthropic" } : {}),
+      ...(llmBaseUrl ? { "X-LLM-Base-Url": llmBaseUrl } : {}),
+      ...(llmModel ? { "X-LLM-Model": llmModel } : {}),
       ...(slackToken ? { "X-Slack-Token": slackToken } : {}),
       ...(slackChannel ? { "X-Slack-Channel": slackChannel } : {}),
     },

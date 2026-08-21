@@ -155,9 +155,9 @@ async function getMcpClient(accessToken?: string): Promise<{ client: Client; too
   const baseUrl = accessToken ? MCP_ADAPTER_URL : INVENTORY_SERVER_URL;
   if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
   // The adapter proxies multiple resources — inventory-server is registered there as
-  // "mcp-server-retail", so authenticated calls must target its namespaced path.
+  // "okta-demo-inventory", so authenticated calls must target its namespaced path.
   // Unauthenticated calls bypass the adapter entirely (bare /mcp on inventory-server directly).
-  const mcpPath = accessToken ? "/mcp-server-retail/mcp" : "/mcp";
+  const mcpPath = accessToken ? "/okta-demo-inventory/mcp" : "/mcp";
   const transport = new StreamableHTTPClientTransport(
     new URL(`${baseUrl}${mcpPath}`),
     { requestInit: { headers } }
@@ -195,7 +195,7 @@ async function callMcpTool(client: Client, name: string, args: Record<string, un
 
 // ── LLM loop ──────────────────────────────────────────────────────────────────
 
-interface LLMOverrides { anthropicKey?: string; openaiKey?: string; }
+interface LLMOverrides { anthropicKey?: string; openaiKey?: string; litellmKey?: string; litellmBaseUrl?: string; litellmModel?: string; }
 
 async function* runAgentLoop(
   userMessage: string,
@@ -207,7 +207,9 @@ async function* runAgentLoop(
   signal?: AbortSignal
 ): AsyncGenerator<string> {
   const messages: Message[] = [...history, { role: "user", content: userMessage }];
-  if (overrides?.anthropicKey || process.env.ANTHROPIC_API_KEY) {
+  if (overrides?.litellmKey && overrides?.litellmBaseUrl) {
+    yield* runOpenAI(messages, system, client, tools, overrides, signal);
+  } else if (overrides?.anthropicKey || process.env.ANTHROPIC_API_KEY) {
     yield* runAnthropic(messages, system, client, tools, overrides, signal);
   } else if (overrides?.openaiKey || process.env.OPENAI_API_KEY) {
     yield* runOpenAI(messages, system, client, tools, overrides, signal);
@@ -269,7 +271,9 @@ async function* runOpenAI(
   overrides?: LLMOverrides,
   signal?: AbortSignal
 ): AsyncGenerator<string> {
-  const openai = new OpenAI({ ...(overrides?.openaiKey && { apiKey: overrides.openaiKey }) });
+  const openai = overrides?.litellmKey && overrides?.litellmBaseUrl
+    ? new OpenAI({ apiKey: overrides.litellmKey, baseURL: overrides.litellmBaseUrl })
+    : new OpenAI({ ...(overrides?.openaiKey && { apiKey: overrides.openaiKey }) });
   const openaiTools: OpenAI.ChatCompletionTool[] = tools.map((t) => ({
     type: "function" as const,
     function: { name: t.name, description: t.description, parameters: t.inputSchema },
@@ -282,7 +286,7 @@ async function* runOpenAI(
   while (true) {
     if (signal?.aborted) return;
     const response = await openai.chat.completions.create({
-      model: process.env.OPENAI_MODEL ?? "gpt-4o",
+      model: overrides?.litellmModel || process.env.OPENAI_MODEL || "gpt-4o",
       messages: msgs,
       tools: openaiTools.length > 0 ? openaiTools : undefined,
     });
@@ -312,7 +316,7 @@ const app = express();
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-LLM-Api-Key, X-LLM-Provider, X-Slack-Token, X-Slack-Channel");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-LLM-Api-Key, X-LLM-Provider, X-LLM-Base-Url, X-LLM-Model, X-Slack-Token, X-Slack-Channel");
   if (req.method === "OPTIONS") { res.sendStatus(200); return; }
   next();
 });
@@ -327,10 +331,14 @@ app.post("/chat", async (req, res) => {
   if (!message) { res.status(400).json({ error: "message required" }); return; }
 
   const llmOverrides: LLMOverrides = {
-    anthropicKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] !== "openai"
+    anthropicKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] !== "openai" && req.headers["x-llm-provider"] !== "litellm"
       ? String(req.headers["x-llm-api-key"]) : undefined,
     openaiKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] === "openai"
       ? String(req.headers["x-llm-api-key"]) : undefined,
+    litellmKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] === "litellm"
+      ? String(req.headers["x-llm-api-key"]) : undefined,
+    litellmBaseUrl: req.headers["x-llm-base-url"] ? String(req.headers["x-llm-base-url"]) : undefined,
+    litellmModel: req.headers["x-llm-model"] ? String(req.headers["x-llm-model"]) : undefined,
   };
 
   const authHeader = req.headers.authorization;

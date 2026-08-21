@@ -286,6 +286,7 @@ async function getA2AToken(idJag: string, worker: WorkerCfg): Promise<string> {
 }
 
 async function invokeWorker(worker: WorkerCfg, subjectToken: string, task: string, tx = TX, overrides?: LLMOverrides): Promise<string> {
+  await emitEvent("P6 Orchestrator", "spawned", `${worker.label} Worker`, `task=${task.slice(0, 80)}`, undefined, "info");
   const idJag = await getA2AIdJag(subjectToken, worker, tx);
   const a2aToken = await getA2AToken(idJag, worker);
   await emitEvent("P6 Orchestrator", "invoking worker", `${worker.label} Worker`, `task=${task.slice(0, 80)}`, undefined, "info");
@@ -297,6 +298,12 @@ async function invokeWorker(worker: WorkerCfg, subjectToken: string, task: strin
       Authorization: `Bearer ${a2aToken}`,
       ...(overrides?.anthropicKey && { "X-LLM-Api-Key": overrides.anthropicKey, "X-LLM-Provider": "anthropic" }),
       ...(overrides?.openaiKey && { "X-LLM-Api-Key": overrides.openaiKey, "X-LLM-Provider": "openai" }),
+      ...(overrides?.litellmKey && overrides?.litellmBaseUrl && {
+        "X-LLM-Api-Key": overrides.litellmKey,
+        "X-LLM-Provider": "litellm",
+        "X-LLM-Base-Url": overrides.litellmBaseUrl,
+        ...(overrides?.litellmModel && { "X-LLM-Model": overrides.litellmModel }),
+      }),
     },
     body: JSON.stringify({ task }),
   });
@@ -369,7 +376,7 @@ function buildTools(workers: WorkerCfg[]): ToolDef[] {
 // ── LLM agent loop (streamed to the console) ───────────────────────────────────
 interface Message { role: "user" | "assistant"; content: string; }
 type ToolExecutor = (name: string, args: Record<string, unknown>) => Promise<string>;
-interface LLMOverrides { anthropicKey?: string; openaiKey?: string; }
+interface LLMOverrides { anthropicKey?: string; openaiKey?: string; litellmKey?: string; litellmBaseUrl?: string; litellmModel?: string; }
 
 async function* runAgentLoop(userMessage: string, history: Message[], callTool: ToolExecutor, tools: ToolDef[], workerLabels: string[], overrides?: LLMOverrides, signal?: AbortSignal): AsyncGenerator<string> {
   const messages: Message[] = [...history, { role: "user", content: userMessage }];
@@ -379,7 +386,9 @@ async function* runAgentLoop(userMessage: string, history: Message[], callTool: 
     `Available worker agents: ${workerList}. ` +
     `Your job: 1) delegate the right sub-tasks to the worker agents using their invoke_*_worker tools, 2) combine their results into one clear report, 3) post the report to Slack with post_slack_message. ` +
     `Use Slack markdown (*bold*, \`code\`, bullet lists). Always complete the full workflow including the Slack post.`;
-  if (overrides?.anthropicKey || process.env.ANTHROPIC_API_KEY) {
+  if (overrides?.litellmKey && overrides?.litellmBaseUrl) {
+    yield* runOpenAI(messages, system, callTool, tools, overrides, signal);
+  } else if (overrides?.anthropicKey || process.env.ANTHROPIC_API_KEY) {
     yield* runAnthropic(messages, system, callTool, tools, overrides, signal);
   } else if (overrides?.openaiKey || process.env.OPENAI_API_KEY) {
     yield* runOpenAI(messages, system, callTool, tools, overrides, signal);
@@ -417,12 +426,14 @@ async function* runAnthropic(messages: Message[], system: string, callTool: Tool
 }
 
 async function* runOpenAI(messages: Message[], system: string, callTool: ToolExecutor, tools: ToolDef[], overrides?: LLMOverrides, signal?: AbortSignal): AsyncGenerator<string> {
-  const openai = new OpenAI({ ...(overrides?.openaiKey && { apiKey: overrides.openaiKey }) });
+  const openai = overrides?.litellmKey && overrides?.litellmBaseUrl
+    ? new OpenAI({ apiKey: overrides.litellmKey, baseURL: overrides.litellmBaseUrl })
+    : new OpenAI({ ...(overrides?.openaiKey && { apiKey: overrides.openaiKey }) });
   const openaiTools: OpenAI.ChatCompletionTool[] = tools.map((t) => ({ type: "function" as const, function: { name: t.name, description: t.description, parameters: t.inputSchema } }));
   let msgs: OpenAI.ChatCompletionMessageParam[] = [{ role: "system", content: system }, ...messages.map((m) => ({ role: m.role, content: m.content }))];
   while (true) {
     if (signal?.aborted) return;
-    const response = await openai.chat.completions.create({ model: process.env.OPENAI_MODEL ?? "gpt-4o", messages: msgs, tools: openaiTools });
+    const response = await openai.chat.completions.create({ model: overrides?.litellmModel || process.env.OPENAI_MODEL || "gpt-4o", messages: msgs, tools: openaiTools });
     const choice = response.choices[0];
     if (choice.message.content) yield choice.message.content;
     if (choice.finish_reason !== "tool_calls" || !choice.message.tool_calls?.length) break;
@@ -466,7 +477,7 @@ const app = express();
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-LLM-Api-Key, X-LLM-Provider, X-Slack-Token, X-Slack-Channel");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-LLM-Api-Key, X-LLM-Provider, X-LLM-Base-Url, X-LLM-Model, X-Slack-Token, X-Slack-Channel");
   if (req.method === "OPTIONS") { res.sendStatus(200); return; }
   next();
 });
@@ -502,10 +513,14 @@ app.post("/chat", async (req, res) => {
   if (!message) { res.status(400).json({ error: "message required" }); return; }
 
   const llmOverrides: LLMOverrides = {
-    anthropicKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] !== "openai"
+    anthropicKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] !== "openai" && req.headers["x-llm-provider"] !== "litellm"
       ? String(req.headers["x-llm-api-key"]) : undefined,
     openaiKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] === "openai"
       ? String(req.headers["x-llm-api-key"]) : undefined,
+    litellmKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] === "litellm"
+      ? String(req.headers["x-llm-api-key"]) : undefined,
+    litellmBaseUrl: req.headers["x-llm-base-url"] ? String(req.headers["x-llm-base-url"]) : undefined,
+    litellmModel: req.headers["x-llm-model"] ? String(req.headers["x-llm-model"]) : undefined,
   };
   const slackToken = req.headers["x-slack-token"] ? String(req.headers["x-slack-token"]) : undefined;
   const slackChannel = req.headers["x-slack-channel"] ? String(req.headers["x-slack-channel"]) : undefined;
@@ -563,10 +578,14 @@ app.post("/invoke", async (req, res) => {
   if (!message) { res.status(400).json({ error: "message required" }); return; }
 
   const llmOverrides: LLMOverrides = {
-    anthropicKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] !== "openai"
+    anthropicKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] !== "openai" && req.headers["x-llm-provider"] !== "litellm"
       ? String(req.headers["x-llm-api-key"]) : undefined,
     openaiKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] === "openai"
       ? String(req.headers["x-llm-api-key"]) : undefined,
+    litellmKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] === "litellm"
+      ? String(req.headers["x-llm-api-key"]) : undefined,
+    litellmBaseUrl: req.headers["x-llm-base-url"] ? String(req.headers["x-llm-base-url"]) : undefined,
+    litellmModel: req.headers["x-llm-model"] ? String(req.headers["x-llm-model"]) : undefined,
   };
   const slackToken = req.headers["x-slack-token"] ? String(req.headers["x-slack-token"]) : undefined;
   const slackChannel = req.headers["x-slack-channel"] ? String(req.headers["x-slack-channel"]) : undefined;

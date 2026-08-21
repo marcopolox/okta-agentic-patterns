@@ -11,16 +11,25 @@ export default function ApiKeyGate({ children }: { children: React.ReactNode }) 
 
 function ApiKeyGateInner({ children }: { children: React.ReactNode }) {
   const { hasApiKey, creds, setCreds, loaded } = useDemoCredentials();
-  const [provider, setProvider] = useState<"anthropic" | "openai">("anthropic");
+  const [provider, setProvider] = useState<"anthropic" | "openai" | "litellm">("anthropic");
   const [inputValue, setInputValue] = useState("");
+  const [baseUrlValue, setBaseUrlValue] = useState("");
+  const [modelValue, setModelValue] = useState("");
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!inputValue.trim()) return;
+    if (provider === "litellm" && !baseUrlValue.trim()) return;
     setCreds({
       ...creds,
       provider,
-      ...(provider === "anthropic" ? { anthropicKey: inputValue.trim() } : { openaiKey: inputValue.trim() }),
+      ...(provider === "anthropic" && { anthropicKey: inputValue.trim() }),
+      ...(provider === "openai" && { openaiKey: inputValue.trim() }),
+      ...(provider === "litellm" && {
+        litellmKey: inputValue.trim(),
+        litellmBaseUrl: baseUrlValue.trim(),
+        litellmModel: modelValue.trim(),
+      }),
     });
   };
 
@@ -58,11 +67,35 @@ function ApiKeyGateInner({ children }: { children: React.ReactNode }) {
               >
                 OpenAI
               </button>
+              <button
+                type="button"
+                onClick={() => setProvider("litellm")}
+                className={`flex-1 py-2 text-sm font-medium transition-colors ${
+                  provider === "litellm"
+                    ? "bg-white/10 text-white"
+                    : "text-gray-400 hover:text-white"
+                }`}
+              >
+                LiteLLM
+              </button>
             </div>
+
+            {provider === "litellm" && (
+              <div>
+                <label className="mb-1.5 block text-sm text-gray-300">LiteLLM Base URL</label>
+                <input
+                  type="text"
+                  value={baseUrlValue}
+                  onChange={(e) => setBaseUrlValue(e.target.value)}
+                  placeholder="https://your-litellm-proxy.example.com"
+                  className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-white placeholder-gray-500 outline-none focus:border-white/30 focus:ring-0"
+                />
+              </div>
+            )}
 
             <div>
               <label className="mb-1.5 block text-sm text-gray-300">
-                {provider === "anthropic" ? "Anthropic API Key" : "OpenAI API Key"}
+                {provider === "anthropic" ? "Anthropic API Key" : provider === "openai" ? "OpenAI API Key" : "LiteLLM API Key"}
               </label>
               <input
                 type="password"
@@ -74,9 +107,22 @@ function ApiKeyGateInner({ children }: { children: React.ReactNode }) {
               />
             </div>
 
+            {provider === "litellm" && (
+              <div>
+                <label className="mb-1.5 block text-sm text-gray-300">Model / Alias (optional)</label>
+                <input
+                  type="text"
+                  value={modelValue}
+                  onChange={(e) => setModelValue(e.target.value)}
+                  placeholder="e.g. gpt-4o, or a LiteLLM router alias"
+                  className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-white placeholder-gray-500 outline-none focus:border-white/30 focus:ring-0"
+                />
+              </div>
+            )}
+
             <button
               type="submit"
-              disabled={!inputValue.trim()}
+              disabled={!inputValue.trim() || (provider === "litellm" && !baseUrlValue.trim())}
               className="w-full rounded-lg bg-white py-2 text-sm font-semibold text-gray-900 transition-opacity disabled:opacity-40"
             >
               Continue

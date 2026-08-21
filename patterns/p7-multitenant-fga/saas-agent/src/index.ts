@@ -4,7 +4,7 @@ import OpenAI from "openai";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { SignJWT, importJWK, importPKCS8 } from "jose";
-import { OpenFgaClient, CredentialsMethod } from "@openfga/sdk";
+import { OpenFgaClient, CredentialsMethod, ConsistencyPreference } from "@openfga/sdk";
 
 const PORT = parseInt(process.env.PORT ?? "3700");
 const EVENT_BUS_URL = process.env.EVENT_BUS_URL ?? "http://localhost:4000";
@@ -86,13 +86,26 @@ const fgaClient = new OpenFgaClient({
   },
 });
 
-async function checkFgaDelegation(userEmail: string, toolName: string): Promise<boolean> {
+// This is a shared demo login, so every visitor authenticates as the same Okta
+// user — the console folds its per-page-mount viewerSessionId into the FGA user
+// id so each browser session gets its own isolated set of delegated-tool grants.
+// Must match fgaUserId() in console/app/api/p7/delegations/route.ts exactly.
+function fgaUserId(email: string, viewerSessionId?: string | null): string {
+  return viewerSessionId ? `${email}__${viewerSessionId}` : email;
+}
+
+async function checkFgaDelegation(userEmail: string, toolName: string, viewerSessionId?: string | null): Promise<boolean> {
   try {
-    const response = await fgaClient.check({
-      user: `user:${userEmail}`,
-      relation: "delegated",
-      object: `tool:${toolName}`,
-    });
+    const response = await fgaClient.check(
+      {
+        user: `user:${fgaUserId(userEmail, viewerSessionId)}`,
+        relation: "delegated",
+        object: `tool:${toolName}`,
+      },
+      // Default MINIMIZE_LATENCY can read a replica that hasn't caught up with a
+      // delegation toggle's write/delete yet, letting a just-revoked tool through.
+      { consistency: ConsistencyPreference.HigherConsistency },
+    );
     return response.allowed === true;
   } catch (err) {
     console.error(`[FGA] check error for ${toolName}:`, err);
@@ -249,6 +262,7 @@ interface RequestContext {
   userIdToken: string;
   userEmail: string;
   tokenCache: Map<string, string>;
+  viewerSessionId?: string | null;
 }
 
 async function getTokenForServer(server: DiscoveredServer, scopes: string[], ctx: RequestContext): Promise<string> {
@@ -310,10 +324,10 @@ async function callMcpTool(
   await emitEvent(
     "P7 Agent", "FGA check",
     "Okta FGA",
-    `{ user: "user:${ctx.userEmail}", relation: "delegated", object: "tool:${name}" }`,
+    `{ user: "user:${fgaUserId(ctx.userEmail, ctx.viewerSessionId)}", relation: "delegated", object: "tool:${name}" }`,
     undefined, "auth"
   );
-  const allowed = await checkFgaDelegation(ctx.userEmail, name);
+  const allowed = await checkFgaDelegation(ctx.userEmail, name, ctx.viewerSessionId);
   if (!allowed) {
     await emitEvent(
       "Okta FGA", "check result → denied",
@@ -360,8 +374,19 @@ async function callMcpTool(
 
 // ── LLM client (same pattern as P3) ────────────────────────────────────────
 
-const anthropic = process.env.ANTHROPIC_API_KEY ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }) : null;
-const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
+interface LLMOverrides { anthropicKey?: string; openaiKey?: string; litellmKey?: string; litellmBaseUrl?: string; litellmModel?: string; }
+
+const defaultAnthropic = process.env.ANTHROPIC_API_KEY ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }) : null;
+const defaultOpenai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
+
+function resolveLlmClients(overrides?: LLMOverrides): { anthropic: Anthropic | null; openai: OpenAI | null; openaiModel: string } {
+  if (overrides?.litellmKey && overrides?.litellmBaseUrl) {
+    return { anthropic: null, openai: new OpenAI({ apiKey: overrides.litellmKey, baseURL: overrides.litellmBaseUrl }), openaiModel: overrides.litellmModel || "gpt-4o" };
+  }
+  if (overrides?.anthropicKey) return { anthropic: new Anthropic({ apiKey: overrides.anthropicKey }), openai: null, openaiModel: "gpt-4o" };
+  if (overrides?.openaiKey) return { anthropic: null, openai: new OpenAI({ apiKey: overrides.openaiKey }), openaiModel: "gpt-4o" };
+  return { anthropic: defaultAnthropic, openai: defaultOpenai, openaiModel: "gpt-4o" };
+}
 
 function buildSystemPrompt(userEmail: string): string {
   return `You are a helpful HR and Finance assistant for ${userEmail}.
@@ -370,7 +395,9 @@ You have access to HR tools (employee data, org chart, departments) and Finance 
 
 Call tools immediately when asked — never ask for clarification first. For example, if asked to list employees, call list_employees right away with no arguments. If asked about departments, call list_departments immediately. Let the tool results speak for themselves.
 
-If you receive a denial message back from a tool (saying the action hasn't been delegated), relay it clearly to the user and tell them to toggle that permission on in the delegation panel on the left. Do NOT call the same denied tool again.
+Permissions can be toggled on or off by the user at any time, even mid-conversation, so always call the tool fresh for each new request — never assume a past denial or past success in this conversation still applies. If a tool call in THIS reply just returned a denial, don't retry that same call again within this same reply; but a new user message always gets a fresh tool call.
+
+If you receive a denial message back from a tool (saying the action hasn't been delegated), relay it clearly to the user and tell them to toggle that permission on in the delegation panel on the left.
 
 Be concise and professional.`;
 }
@@ -383,7 +410,8 @@ async function runAgentLoop(
   tools: ToolDef[],
   toolMap: Map<string, DiscoveredServer>,
   onToken: (text: string) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  overrides?: LLMOverrides
 ): Promise<void> {
   const messages: Anthropic.MessageParam[] | OpenAI.ChatCompletionMessageParam[] = [
     { role: "user", content: userMessage },
@@ -394,6 +422,8 @@ async function runAgentLoop(
     description: t.description ?? "",
     input_schema: t.inputSchema as Anthropic.Tool["input_schema"],
   }));
+
+  const { anthropic, openai, openaiModel } = resolveLlmClients(overrides);
 
   if (anthropic) {
     let continueLoop = true;
@@ -449,7 +479,7 @@ async function runAgentLoop(
       if (signal?.aborted) return;
       continueLoop = false;
       const stream = await openai.chat.completions.create({
-        model: "gpt-4o",
+        model: openaiModel,
         stream: true,
         messages: messages as OpenAI.ChatCompletionMessageParam[],
         tools: openaiTools,
@@ -500,7 +530,7 @@ app.use(express.json());
 app.use((_req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-LLM-Api-Key, X-LLM-Provider, X-LLM-Base-Url, X-LLM-Model");
   if (_req.method === "OPTIONS") { res.sendStatus(204); return; }
   next();
 });
@@ -529,7 +559,7 @@ app.get("/status", (_req, res) => {
 const seenTokenSessions = new Set<string>();
 
 app.post("/chat", async (req: Request, res: Response): Promise<void> => {
-  const { message, session_id } = req.body as { message: string; session_id?: string };
+  const { message, session_id, viewer_session_id } = req.body as { message: string; session_id?: string; viewer_session_id?: string };
   const authHeader = req.headers.authorization;
 
   if (!authHeader?.startsWith("Bearer ")) {
@@ -558,6 +588,7 @@ app.post("/chat", async (req: Request, res: Response): Promise<void> => {
     userIdToken,
     userEmail,
     tokenCache: new Map(),
+    viewerSessionId: viewer_session_id,
   };
 
   const controller = new AbortController();
@@ -567,11 +598,22 @@ app.post("/chat", async (req: Request, res: Response): Promise<void> => {
   // distinguishes a normal finish from a real client disconnect.
   res.on("close", () => { if (!res.writableEnded) controller.abort(); });
 
+  const overrides: LLMOverrides = {
+    anthropicKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] !== "openai" && req.headers["x-llm-provider"] !== "litellm"
+      ? String(req.headers["x-llm-api-key"]) : undefined,
+    openaiKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] === "openai"
+      ? String(req.headers["x-llm-api-key"]) : undefined,
+    litellmKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] === "litellm"
+      ? String(req.headers["x-llm-api-key"]) : undefined,
+    litellmBaseUrl: req.headers["x-llm-base-url"] ? String(req.headers["x-llm-base-url"]) : undefined,
+    litellmModel: req.headers["x-llm-model"] ? String(req.headers["x-llm-model"]) : undefined,
+  };
+
   try {
     const { tools, toolMap } = await discoverAllTools(ctx);
     await runAgentLoop(message, ctx, tools, toolMap, (text) => {
       res.write(text);
-    }, controller.signal);
+    }, controller.signal, overrides);
   } catch (err) {
     console.error("[P7] Agent error:", err);
     res.write(`\n\n[Agent error: ${String(err)}]`);

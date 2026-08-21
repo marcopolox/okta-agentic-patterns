@@ -131,7 +131,7 @@ export function MissionPanel({
           const isRunning = runningId === mission.id;
           const isOtherRunning = runningId !== null && runningId !== mission.id;
           const isOtherSelected = selectedMissionId !== null && !isSelected;
-          const missionLabel = `Mission ${idx + 1}`;
+          const missionLabel = `Use Case ${idx + 1}`;
 
           if (mission.blockedReason !== undefined) {
             return (
@@ -193,9 +193,10 @@ export function MissionPanel({
                 }`}>
                   {missionLabel}
                 </span>
-                {isSelected && !isRunning && (
-                  <span className="text-[10px] text-cyan-500/70">selected</span>
-                )}
+                <span className="flex items-center gap-1 rounded-md bg-violet-400/10 px-2 py-0.5 text-[10px] font-medium text-violet-300/80">
+                  <Clock size={9} />
+                  {mission.scheduleLabel}
+                </span>
               </div>
 
               {/* Card header */}
@@ -205,12 +206,6 @@ export function MissionPanel({
                   <p className="text-sm font-semibold text-slate-200">{mission.title}</p>
                   <p className="mt-0.5 text-xs text-slate-500">{mission.description}</p>
                 </div>
-              </div>
-
-              {/* Schedule label */}
-              <div className="flex items-center gap-1.5 text-xs text-slate-500">
-                <Clock size={10} />
-                <span>{mission.scheduleLabel}</span>
               </div>
 
               {/* Run button — only shown when this card is selected */}
@@ -266,7 +261,7 @@ export function MissionPanel({
           {lastRanId && (
             <div className="mb-3 flex items-center gap-2 border-b border-gray-700/40 pb-2">
               <span className="text-xs font-medium text-slate-500">
-                {missions.find((m) => m.id === lastRanId)?.title ?? "Mission"}
+                {missions.find((m) => m.id === lastRanId)?.title ?? "Use Case"}
               </span>
               {runningId && (
                 <span className="flex items-center gap-1 text-xs text-cyan-400">

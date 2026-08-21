@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { RotateCw, Server } from "lucide-react";
 import { DemoEvent } from "@/lib/event-bus";
 import { McpServerDef } from "@/lib/patterns";
@@ -36,6 +36,18 @@ interface DiscoveredConnection {
   label: string;
   connectionType?: string;
   active?: boolean;
+  audience?: string;
+  issuerUrl?: string;
+}
+
+// Authorization server ID is the last path segment of its issuer URL (.../oauth2/{asId}).
+function authServerId(issuerUrl: string | undefined): string | undefined {
+  return issuerUrl?.split("/").pop();
+}
+
+// A2A workload-principal ID is the last segment of the resource's ORN (orn:...:resource-servers:a2a:{wlpId}).
+function workloadPrincipalId(audience: string | undefined): string | undefined {
+  return audience?.startsWith("orn:") ? audience.split(":").pop() : audience;
 }
 
 interface Props {
@@ -64,56 +76,52 @@ export function McpServerStatus({ servers, events, resetKey, configSource, disco
       tools: [] as string[],
       discoveredType: conn.connectionType,
       connectionActive: conn.active,
+      resourceId: workloadPrincipalId(conn.audience),
     })),
   ];
 
   const [states, setStates] = useState<Record<string, ServerState>>(() => makeInitial(servers));
+  const processedCountRef = useRef(0);
 
   useEffect(() => {
+    processedCountRef.current = 0;
     setStates(makeInitial(servers));
   }, [resetKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (events.length === 0) {
+      processedCountRef.current = 0;
       setStates(makeInitial(servers));
       return;
     }
-    const ev = events[events.length - 1];
-    const server = servers.find((s) => s.actor === ev.actor);
-    if (!server) return;
+    // Apply every event since the last render, not just the latest one — several can
+    // land in the same batch (e.g. a denial immediately followed by the LLM's next tool
+    // call), and only reacting to the trailing event silently drops the earlier ones.
+    const newEvents = events.slice(processedCountRef.current);
+    processedCountRef.current = events.length;
+    if (newEvents.length === 0) return;
 
-    if (ev.action === "called tool") {
-      setStates((prev) => {
-        const cur = prev[server.actor] ?? { status: "idle", calledTools: new Set(), failedTools: new Set() };
-        const calledTools = new Set(cur.calledTools);
-        if (ev.target) calledTools.add(ev.target);
-        return { ...prev, [server.actor]: { ...cur, status: "success", calledTools } };
-      });
-    } else if (ev.action === "rejected request") {
-      setStates((prev) => ({
-        ...prev,
-        [server.actor]: {
-          ...prev[server.actor],
-          status: "error",
-          errorMsg: ev.detail ?? "Request rejected by Okta",
-        },
-      }));
-    } else if (ev.action === "policy denied") {
-      setStates((prev) => {
-        const cur = prev[server.actor] ?? { status: "idle", calledTools: new Set(), failedTools: new Set() };
-        const failedTools = new Set(cur.failedTools);
-        if (ev.target) failedTools.add(ev.target);
-        return {
-          ...prev,
-          [server.actor]: {
-            ...cur,
-            status: "error",
-            failedTools,
-            errorMsg: ev.detail ?? "Okta policy denied",
-          },
-        };
-      });
-    }
+    setStates((prev) => {
+      let next = prev;
+      for (const ev of newEvents) {
+        const server = servers.find((s) => s.actor === ev.actor);
+        if (!server) continue;
+        const cur = next[server.actor] ?? { status: "idle", calledTools: new Set(), failedTools: new Set() };
+
+        if (ev.action === "called tool") {
+          const calledTools = new Set(cur.calledTools);
+          if (ev.target) calledTools.add(ev.target);
+          next = { ...next, [server.actor]: { ...cur, status: "success", calledTools } };
+        } else if (ev.action === "rejected request") {
+          next = { ...next, [server.actor]: { ...cur, status: "error", errorMsg: ev.detail ?? "Request rejected by Okta" } };
+        } else if (ev.action === "policy denied") {
+          const failedTools = new Set(cur.failedTools);
+          if (ev.target) failedTools.add(ev.target);
+          next = { ...next, [server.actor]: { ...cur, status: "error", failedTools, errorMsg: ev.detail ?? "Okta policy denied" } };
+        }
+      }
+      return next;
+    });
   }, [events]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
@@ -140,6 +148,7 @@ export function McpServerStatus({ servers, events, resetKey, configSource, disco
 
           // Determine connection type for badge
           let connectionType: string | undefined;
+          let resourceId: string | undefined = server.resourceId;
           if (isExtra) {
             connectionType = server.discoveredType;
           } else {
@@ -149,6 +158,7 @@ export function McpServerStatus({ servers, events, resetKey, configSource, disco
               conn.label.toLowerCase().includes(server.actor.toLowerCase())
             );
             connectionType = match?.connectionType;
+            resourceId = authServerId(match?.issuerUrl) ?? resourceId;
           }
 
           // Determine if connection is inactive (from Okta but deactivated)
@@ -238,6 +248,13 @@ export function McpServerStatus({ servers, events, resetKey, configSource, disco
                   </div>
                 )}
               </div>
+
+              {/* Resource ID (authorization server ID) — cross-references with the ID shown in event details */}
+              {resourceId && (
+                <p className="mb-2 truncate font-mono text-[9px] text-slate-600" title={resourceId}>
+                  {resourceId}
+                </p>
+              )}
 
               {/* Tool chips */}
               <div className="flex flex-wrap gap-1">

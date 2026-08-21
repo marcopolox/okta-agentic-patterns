@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { OpenFgaClient, CredentialsMethod } from "@openfga/sdk";
+import { OpenFgaClient, CredentialsMethod, ConsistencyPreference } from "@openfga/sdk";
 
 async function emitFgaEvent(tool: string, action: "granted" | "revoked", user: string, sessionId?: string) {
   const eventBusUrl = process.env.EVENT_BUS_URL ?? "http://event-bus:4000";
@@ -46,7 +46,9 @@ function makeFgaClient(): OpenFgaClient {
 // per-page-mount viewerSessionId into the FGA user id gives each browser session
 // its own isolated set of tuples while keeping the same real identity.
 function fgaUserId(email: string, viewerSessionId?: string | null): string {
-  return viewerSessionId ? `${email}::${viewerSessionId}` : email;
+  // OpenFGA rejects "::" inside a user id (validation error: "the 'user' field is malformed") —
+  // double underscore is a safe separator that doesn't collide with the type:id syntax.
+  return viewerSessionId ? `${email}__${viewerSessionId}` : email;
 }
 
 function getEmailFromToken(token: string): string | null {
@@ -83,11 +85,14 @@ export async function GET(req: NextRequest) {
 
   try {
     const fga = makeFgaClient();
-    const result = await fga.read({
-      user: `user:${fgaUserId(email, viewerSessionId)}`,
-      relation: "delegated",
-      object: "tool:",
-    });
+    const result = await fga.read(
+      {
+        user: `user:${fgaUserId(email, viewerSessionId)}`,
+        relation: "delegated",
+        object: "tool:",
+      },
+      { consistency: ConsistencyPreference.HigherConsistency },
+    );
 
     const granted = new Set<string>(
       (result.tuples ?? [])

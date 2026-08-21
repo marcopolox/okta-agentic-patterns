@@ -24,7 +24,7 @@ export function FlowDiagram({ patternId, animate = false, fill = false, mission 
   const diagram = patternId === "p6" && mission === 1 ? <P6Mission1Diagram /> : diagrams[patternId];
   return (
     <div
-      className={`flex h-full items-center justify-center rounded-xl border border-cyan-500/20 bg-gray-900/80 p-4 neon-card [&_svg]:overflow-visible ${animate ? "neon-border" : ""} ${fill ? "[&_svg]:max-w-none [&_svg]:w-full" : ""}`}
+      className={`flex h-full items-center justify-center rounded-xl border border-cyan-500/20 bg-gray-900/80 p-4 neon-card [&_svg]:overflow-visible ${animate ? "neon-border" : ""} ${fill ? "[&_svg]:max-w-none [&_svg]:w-full [&_svg]:h-auto [&_svg]:max-h-[65vh]" : ""}`}
     >
       {diagram}
     </div>

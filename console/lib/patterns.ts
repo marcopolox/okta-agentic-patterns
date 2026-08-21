@@ -4,6 +4,7 @@ export interface McpServerDef {
   name: string;   // display name shown in the UI
   actor: string;  // matches event.actor emitted by that server
   tools: string[]; // tool names, shown as chips
+  resourceId?: string; // Okta authorization server ID backing this resource — shown in the UI to cross-reference with events
 }
 
 export interface PlatformLink {
@@ -50,16 +51,20 @@ export const PATTERNS: Pattern[] = [
     rightPanel: "connection-guide",
     buildStatus: "done",
     hideCta: true,
+    disabled: true,
+    note: "Okta MCP Bridge is temporarily unavailable",
     mcpServers: [
       {
         name: "HR Server MCP",
         actor: "HR Server",
         tools: ["list_employees", "get_employee", "get_org_chart", "list_departments", "search_employees", "update_employee_title"],
+        resourceId: "aus11q3f89dHdY0jx1d8",
       },
       {
         name: "Finance Server MCP",
         actor: "Finance Server",
         tools: ["get_budget", "list_invoices", "get_expense_report", "list_cost_centers", "get_invoice"],
+        resourceId: "aus11q3a2k8DT8bws1d8",
       },
     ],
   },
@@ -76,11 +81,14 @@ export const PATTERNS: Pattern[] = [
     agentHealthUrl: process.env.P2_AGENT_INTERNAL_URL ?? "http://localhost:3200",
     rightPanel: "chat",
     buildStatus: "done",
+    disabled: true,
+    note: "Okta MCP Bridge is temporarily unavailable",
     mcpServers: [
       {
         name: "Inventory MCP",
         actor: "Inventory Server",
         tools: ["get_product_catalog", "check_stock", "get_product_details", "get_order_status", "list_categories"],
+        resourceId: "aus11q3j37iXrPpcL1d8",
       },
     ],
   },
@@ -105,11 +113,13 @@ export const PATTERNS: Pattern[] = [
         name: "HR Server MCP",
         actor: "HR Server",
         tools: ["list_employees", "get_employee", "get_org_chart", "list_departments", "search_employees", "update_employee_title"],
+        resourceId: "aus11q3f89dHdY0jx1d8",
       },
       {
         name: "Finance Server MCP",
         actor: "Finance Server",
         tools: ["get_budget", "list_invoices", "get_expense_report", "list_cost_centers", "get_invoice"],
+        resourceId: "aus11q3a2k8DT8bws1d8",
       },
     ],
   },
@@ -153,6 +163,7 @@ export const PATTERNS: Pattern[] = [
         name: "Inventory MCP",
         actor: "Inventory Server",
         tools: ["check_stock", "get_product_details", "update_stock"],
+        resourceId: "aus11q3j37iXrPpcL1d8",
       },
     ],
   },
@@ -177,11 +188,13 @@ export const PATTERNS: Pattern[] = [
         name: "HR Server MCP",
         actor: "HR Server",
         tools: ["list_employees", "list_departments"],
+        resourceId: "aus11q3f89dHdY0jx1d8",
       },
       {
         name: "Finance Server MCP",
         actor: "Finance Server",
         tools: ["get_budget", "get_expense_report", "list_cost_centers"],
+        resourceId: "aus11q3a2k8DT8bws1d8",
       },
     ],
   },
@@ -205,11 +218,13 @@ export const PATTERNS: Pattern[] = [
         name: "HR Server MCP",
         actor: "HR Server",
         tools: ["list_employees", "get_employee", "get_org_chart", "list_departments", "search_employees", "update_employee_title"],
+        resourceId: "aus11q3f89dHdY0jx1d8",
       },
       {
         name: "Finance Server MCP",
         actor: "Finance Server",
         tools: ["get_budget", "list_invoices", "get_expense_report", "list_cost_centers", "get_invoice"],
+        resourceId: "aus11q3a2k8DT8bws1d8",
       },
     ],
   },

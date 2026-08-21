@@ -1,4 +1,4 @@
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { cookies } from "next/headers";
 import { getPattern } from "@/lib/patterns";
 import { getIndustryOverrides, DEFAULT_INDUSTRY_ID } from "@/lib/industries";
@@ -16,12 +16,7 @@ export default async function PatternPage({ params }: Props) {
   if (!pattern) notFound();
 
   if (pattern.disabled) {
-    return (
-      <main className="relative flex h-full flex-col items-center justify-center px-6 py-3 text-center">
-        <p className="text-lg font-medium text-slate-300">This use case is not accessible yet.</p>
-        <p className="mt-2 text-sm text-slate-500">Check back soon.</p>
-      </main>
-    );
+    redirect("/");
   }
 
   let active = false;

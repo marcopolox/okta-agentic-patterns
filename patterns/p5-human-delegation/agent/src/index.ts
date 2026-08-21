@@ -275,7 +275,7 @@ interface RequestContext {
   readToken: string | null; // populated at request start via XAA
 }
 
-interface LLMOverrides { anthropicKey?: string; openaiKey?: string; }
+interface LLMOverrides { anthropicKey?: string; openaiKey?: string; litellmKey?: string; litellmBaseUrl?: string; litellmModel?: string; }
 
 async function* runAgentLoop(
   userMessage: string,
@@ -290,7 +290,9 @@ async function* runAgentLoop(
   const greetInstruction = isFirstMessage ? `Start your response by greeting ${ctx.userEmail} by name. ` : "";
   const system = `${greetInstruction}You are a helpful inventory assistant acting on behalf of ${ctx.userEmail}. Use the available tools to answer questions about products, stock levels, and orders. For stock updates, explain what you're doing before calling the tool. Be concise and format responses as readable markdown. When presenting product or inventory data, use tables.`;
 
-  if (overrides?.anthropicKey || process.env.ANTHROPIC_API_KEY) {
+  if (overrides?.litellmKey && overrides?.litellmBaseUrl) {
+    yield* runOpenAI(messages, system, tools, ctx, overrides, signal);
+  } else if (overrides?.anthropicKey || process.env.ANTHROPIC_API_KEY) {
     yield* runAnthropic(messages, system, tools, ctx, overrides, signal);
   } else if (overrides?.openaiKey || process.env.OPENAI_API_KEY) {
     yield* runOpenAI(messages, system, tools, ctx, overrides, signal);
@@ -388,7 +390,9 @@ async function* runOpenAI(
   overrides?: LLMOverrides,
   signal?: AbortSignal
 ): AsyncGenerator<string> {
-  const openai = new OpenAI({ ...(overrides?.openaiKey && { apiKey: overrides.openaiKey }) });
+  const openai = overrides?.litellmKey && overrides?.litellmBaseUrl
+    ? new OpenAI({ apiKey: overrides.litellmKey, baseURL: overrides.litellmBaseUrl })
+    : new OpenAI({ ...(overrides?.openaiKey && { apiKey: overrides.openaiKey }) });
   const openaiTools: OpenAI.ChatCompletionTool[] = tools.map((t) => ({
     type: "function" as const,
     function: { name: t.name, description: t.description, parameters: t.inputSchema },
@@ -402,7 +406,7 @@ async function* runOpenAI(
   while (true) {
     if (signal?.aborted) return;
     const response = await openai.chat.completions.create({
-      model: process.env.OPENAI_MODEL ?? "gpt-4o",
+      model: overrides?.litellmModel || process.env.OPENAI_MODEL || "gpt-4o",
       messages: msgs,
       tools: openaiTools,
     });
@@ -459,7 +463,7 @@ const app = express();
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-LLM-Api-Key, X-LLM-Provider");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-LLM-Api-Key, X-LLM-Provider, X-LLM-Base-Url, X-LLM-Model");
   if (req.method === "OPTIONS") { res.sendStatus(200); return; }
   next();
 });
@@ -478,10 +482,14 @@ app.post("/chat", async (req, res) => {
   }
 
   const llmOverrides: LLMOverrides = {
-    anthropicKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] !== "openai"
+    anthropicKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] !== "openai" && req.headers["x-llm-provider"] !== "litellm"
       ? String(req.headers["x-llm-api-key"]) : undefined,
     openaiKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] === "openai"
       ? String(req.headers["x-llm-api-key"]) : undefined,
+    litellmKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] === "litellm"
+      ? String(req.headers["x-llm-api-key"]) : undefined,
+    litellmBaseUrl: req.headers["x-llm-base-url"] ? String(req.headers["x-llm-base-url"]) : undefined,
+    litellmModel: req.headers["x-llm-model"] ? String(req.headers["x-llm-model"]) : undefined,
   };
 
   const authHeader = req.headers.authorization;

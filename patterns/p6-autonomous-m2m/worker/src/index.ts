@@ -219,7 +219,7 @@ async function callMcpTool(name: string, args: Record<string, unknown>, token: s
 interface Message { role: "user" | "assistant"; content: string; }
 type ToolExecutor = (name: string, args: Record<string, unknown>) => Promise<string>;
 
-interface LLMOverrides { anthropicKey?: string; openaiKey?: string; }
+interface LLMOverrides { anthropicKey?: string; openaiKey?: string; litellmKey?: string; litellmBaseUrl?: string; litellmModel?: string; }
 
 async function runAgentLoop(task: string, callTool: ToolExecutor, tools: ToolDef[], overrides?: LLMOverrides): Promise<string> {
   const system = `You are the ${WORKER_LABEL} specialist worker agent in an autonomous multi-agent system. ` +
@@ -227,6 +227,7 @@ async function runAgentLoop(task: string, callTool: ToolExecutor, tools: ToolDef
     `Use your ${WORKER_LABEL} tools to fulfill the orchestrator's task and return a concise, well-structured analysis (markdown). ` +
     `Only use the tools available to you; never fabricate data. Return just your ${WORKER_LABEL} findings — the orchestrator will combine them with other workers' results.`;
   const messages: Message[] = [{ role: "user", content: task }];
+  if (overrides?.litellmKey && overrides?.litellmBaseUrl) return runOpenAI(messages, system, callTool, tools, overrides);
   if (overrides?.anthropicKey || process.env.ANTHROPIC_API_KEY) return runAnthropic(messages, system, callTool, tools, overrides);
   if (overrides?.openaiKey || process.env.OPENAI_API_KEY) return runOpenAI(messages, system, callTool, tools, overrides);
   return "No LLM API key configured (ANTHROPIC_API_KEY / OPENAI_API_KEY).";
@@ -258,12 +259,14 @@ async function runAnthropic(messages: Message[], system: string, callTool: ToolE
 }
 
 async function runOpenAI(messages: Message[], system: string, callTool: ToolExecutor, tools: ToolDef[], overrides?: LLMOverrides): Promise<string> {
-  const openai = new OpenAI({ ...(overrides?.openaiKey && { apiKey: overrides.openaiKey }) });
+  const openai = overrides?.litellmKey && overrides?.litellmBaseUrl
+    ? new OpenAI({ apiKey: overrides.litellmKey, baseURL: overrides.litellmBaseUrl })
+    : new OpenAI({ ...(overrides?.openaiKey && { apiKey: overrides.openaiKey }) });
   const openaiTools: OpenAI.ChatCompletionTool[] = tools.map((t) => ({ type: "function" as const, function: { name: t.name, description: t.description, parameters: t.inputSchema } }));
   let msgs: OpenAI.ChatCompletionMessageParam[] = [{ role: "system", content: system }, ...messages.map((m) => ({ role: m.role, content: m.content }))];
   let out = "";
   while (true) {
-    const response = await openai.chat.completions.create({ model: process.env.OPENAI_MODEL ?? "gpt-4o", messages: msgs, tools: openaiTools });
+    const response = await openai.chat.completions.create({ model: overrides?.litellmModel || process.env.OPENAI_MODEL || "gpt-4o", messages: msgs, tools: openaiTools });
     const choice = response.choices[0];
     if (choice.message.content) out += choice.message.content;
     if (choice.finish_reason !== "tool_calls" || !choice.message.tool_calls?.length) break;
@@ -299,17 +302,14 @@ app.post("/invoke", async (req, res) => {
   if (!task) { res.status(400).json({ error: "task required" }); return; }
 
   // 1. Validate the orchestrator's A2A token (delegation gate)
-  let claims: InboundClaims;
   try {
-    claims = await validateInboundToken(req.headers.authorization);
+    await validateInboundToken(req.headers.authorization);
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Unauthorized";
     if (req.headers.authorization) await emitEvent(ACTOR, "rejected invocation", "orchestrator", msg, undefined, "error");
     res.status(401).json({ error: msg });
     return;
   }
-
-  await emitEvent(ACTOR, "spawned", "orchestrator", `delegated by ${claims.act?.sub ?? claims.sub}`, undefined, "info");
 
   try {
     // 2. Carry the chain forward: exchange the A2A token for a domain resource token
@@ -319,10 +319,14 @@ app.post("/invoke", async (req, res) => {
     const tools = await discoverToolsViaRest();
     const callTool: ToolExecutor = (name, args) => callMcpTool(name, args, domainToken);
     const overrides: LLMOverrides = {
-      anthropicKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] !== "openai"
+      anthropicKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] !== "openai" && req.headers["x-llm-provider"] !== "litellm"
         ? String(req.headers["x-llm-api-key"]) : undefined,
       openaiKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] === "openai"
         ? String(req.headers["x-llm-api-key"]) : undefined,
+      litellmKey: req.headers["x-llm-api-key"] && req.headers["x-llm-provider"] === "litellm"
+        ? String(req.headers["x-llm-api-key"]) : undefined,
+      litellmBaseUrl: req.headers["x-llm-base-url"] ? String(req.headers["x-llm-base-url"]) : undefined,
+      litellmModel: req.headers["x-llm-model"] ? String(req.headers["x-llm-model"]) : undefined,
     };
     const summary = await runAgentLoop(task, callTool, tools, overrides);
 

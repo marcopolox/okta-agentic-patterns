@@ -44,6 +44,7 @@ export async function GET(req: NextRequest) {
   const credentials = Buffer.from(`${cid}:${cs}`).toString("base64");
 
   let accessToken: string;
+  let idToken: string | undefined;
   try {
     const tokenResp = await fetch(tokenEndpoint, {
       method: "POST",
@@ -65,11 +66,12 @@ export async function GET(req: NextRequest) {
       return NextResponse.redirect(new URL("/patterns/p2?error=token_exchange_failed", base));
     }
 
-    const tokenData = (await tokenResp.json()) as { access_token?: string };
+    const tokenData = (await tokenResp.json()) as { access_token?: string; id_token?: string };
     if (!tokenData.access_token) {
       return NextResponse.redirect(new URL("/patterns/p2?error=no_access_token", base));
     }
     accessToken = tokenData.access_token;
+    idToken = tokenData.id_token;
   } catch (err) {
     console.error("[p2/callback] fetch error:", err);
     return NextResponse.redirect(new URL("/patterns/p2?error=auth_failed", base));
@@ -82,6 +84,14 @@ export async function GET(req: NextRequest) {
     maxAge: 3600,
     path: "/",
   });
+  if (idToken) {
+    cookieStore.set("p2_id_token", idToken, {
+      httpOnly: true,
+      sameSite: "lax",
+      maxAge: 3600,
+      path: "/",
+    });
+  }
 
   return NextResponse.redirect(new URL("/patterns/p2", base));
 }
